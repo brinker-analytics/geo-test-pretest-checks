@@ -12,7 +12,7 @@ Run three checks on your own geo-level sales history before you launch a geo tes
 - **FIX:** something needs to change first: different controls, a longer test, a bigger spend change, or answers from leadership.
 - **DON'T TEST:** the business wouldn't act on the result, so test something else.
 
-**It isn't a design or analysis library.** It doesn't do market search, power simulation, or lift readouts. For those, use the open-source tools these checks are meant to sit in front of:
+**It isn't a design or analysis library.** It doesn't do market search, full power simulation, or lift readouts. For those, use the open-source tools these checks are meant to sit in front of:
 
 - [GeoLift](https://github.com/facebookincubator/GeoLift) (Meta)
 - [Trimmed Match](https://github.com/google/trimmed_match) (Google)
@@ -24,12 +24,13 @@ Credit to those teams for the methods this builds on.
 
 ### 1. Comparison strength: does the control track the test geos?
 
-- **Correlation** between the test geos and the control. It's measured over a long date range on both **daily and weekly** data.
-- **MAPE of the scaled control.** The control is scaled to the test geos with a factor taken from a period **at least as long as the test**.
+- **Correlation** between the test geos and the control, on both **daily and weekly** data, over the full history and over the most recent ~2x test length.
+  - If only the weekly correlation passes, the check still passes: read the test weekly and use the recommended length from the power score (Check 2).
+- **MAPE of the scaled control.** The control is scaled to the test geos with a factor taken from a period **at least as long as the test**. Zero-sales days are left out of MAPE and counted; **WAPE** is reported alongside.
 - **Short-form out-of-sample dry run.**
-  - The check holds back a final window about as long as the test, with a minimum of 2 weeks (2–4 weeks or more is typical). It fits on the earlier pre-period and predicts the held-back window.
+  - The check holds back a final window about as long as the test, with a minimum of 2 weeks (2–4 weeks or more is typical). The scale factor and the noise model are fit on the earlier pre-period only, then the comparison predicts the held-back window.
   - Nothing changed during that window, so the comparison should show about zero lift.
-  - **Pass** if the 90% placebo lift interval includes zero **and** the placebo error is smaller than the planned change.
+  - **Pass only if** the placebo lift is smaller than the MDE (in absolute value) **and** its 90% interval, using the corrected standard error, includes zero.
 
 ### 2. Required spend: what does it cost to detect the lift you care about?
 
@@ -37,10 +38,17 @@ Credit to those teams for the methods this builds on.
 required spend = MDE × baseline treatment sales over the test window ÷ target iROAS
 ```
 
-- **MDE:** sized at **90% confidence, 80% power, one-sided** (lift only), from your own noise. It uses the weekly percentage error of the scaled control in your history.
+- **MDE:** sized at **90% confidence, 80% power, one-sided**, from your own noise, and reported as a **range**:
+  - **Noise:** the out-of-sample weekly % error of the scaled control, from rolling windows (scale factor fit on the preceding period, next week predicted).
+  - **Scale-factor error included:** `se = sd × sqrt(7/test_days + 7/scale_days)`.
+  - **Autocorrelation:** `se` is inflated by `sqrt((1+ρ)/(1−ρ))`, where ρ is the lag-1 autocorrelation of the in-sample weekly residuals (floored at 0, capped at 0.8). `MDE = z × se` is the **corrected estimate**.
+  - **Cross-checks:** an empirical version from rolling fake tests of the full test length in your history (when the history is at least 3x the test length), and the same-season error from last year (when you have a year). The range runs from the lowest to the highest estimate; decisions use the upper end.
+  - On the seeded synthetic data the corrected estimate is calibrated: about 10% false positives and about 80% power at the MDE (`pytest -m slow`). That checks the method, not your data.
+- **Power score:** `power = Φ(change ÷ se − z₉₀)`, the chance the test detects your planned change. Under 80%, you get the shortest length (in whole weeks) that reaches 80%.
 - **Baseline treatment sales:** the test geos' recent run rate × the test length.
-- **Holdout:** is the spend you turn off in the test geos large enough to create the MDE gap at the target iROAS?
-- **Heavy-up:** the result is the extra spend on top of business as usual.
+- **Holdout (`direction="decrease"`):** the baseline **includes** the sales driven by the spend you will turn off. The gap you must create is measured against that baseline: spend turned off × iROAS ≥ MDE × baseline. The test reads a drop.
+- **Heavy-up (`direction="increase"`):** the result is the extra spend on top of business as usual. Enter current spend in the test geos for a sanity check: if the extra spend is larger than current spend, iROAS may not hold at that scale.
+- **Test length:** whole weeks only (a multiple of 7). Weekly reads use Monday–Sunday weeks; weeks with any missing day are dropped.
 - **Profitability:** the revenue-basis target iROAS is compared with the margin-based breakeven iROAS (1 ÷ gross margin). If the target is below breakeven, a "win" would still lose money.
 
 ### 3. Can the business act on the result?
@@ -61,8 +69,10 @@ These are guidance from practice, not rules. They're all parameters in `geo_pret
 
 | Measure | Acceptable | Preferred | Note |
 | --- | --- | --- | --- |
-| Correlation (daily and weekly, long range) | above 90% | above 95% | If only weekly passes, plan a longer test and read it weekly. |
-| MAPE of the scaled control | under 15% | under 10% | Especially on weekly data. |
+| Correlation (daily and weekly, full history and recent) | above 90% | above 95% | Weekly-only pass is OK: read weekly and use the recommended length. |
+| MAPE of the scaled control (weekly) | 10–15% acceptable | under 10% strong | 15–20% is **caution**: not a failure, but the MDE will be higher and the result less certain. Over 20% is weak. |
+| Dry run | \|placebo\| < MDE **and** 90% interval includes zero | | Both are required. |
+| Power at the planned change | 80% | | Below 80%: lengthen the test, change the cells, or plan a bigger change. |
 | Scale-factor period | at least the test length | | |
 | History | at least the test length | a year including a seasonal peak | |
 | Controls | 1–2 | | Use as many as the data affords; in practice usually one or two. |
@@ -76,8 +86,8 @@ jupyter lab notebooks/pretest_checks.ipynb      # or: jupyter notebook
 ```
 
 - **Run headless and keep outputs:** `jupyter nbconvert --to notebook --execute --inplace notebooks/pretest_checks.ipynb`
-- **Run the tests:** `pytest -q`
-- **Regenerate the synthetic sample:** `python scripts/make_synthetic_data.py`
+- **Run the tests:** `pytest -q` (fast). The calibration check is slow: `pytest -m slow -s`.
+- **Regenerate the synthetic sample:** `python scripts/make_synthetic_data.py` (add `--ar 0.5` for autocorrelated geo noise; the committed sample uses none)
 
 ## Input format
 
@@ -86,13 +96,14 @@ The input is a **GA4-style CSV export of sales by date by DMA**. There's no GA4 
 | Column (default name) | Meaning |
 | --- | --- |
 | `Date` | Day, as `YYYYMMDD` (GA4's default) or `YYYY-MM-DD` |
-| `DMA` | Geo (designated market area) |
-| `Purchase revenue` | Sales for that day and geo |
+| `DMA` (or `Region`, `City`, `Metro`, `Country`) | Geo |
+| `Purchase revenue` (or `Total revenue`, `Revenue`, `Transactions`, `Purchases`) | Daily outcome for that day and geo |
 
-- Comment lines starting with `#`, as in GA4's export header, are skipped.
+- Column names above are auto-detected. Comment lines starting with `#` are skipped, and in multi-section exports the first table with a date and a geo column is used.
+- `(not set)` / `(other)` geos and `Grand total` / `Totals` rows are dropped and reported in `df.attrs["load_report"]`.
 - Duplicate date and geo rows are summed.
-- Missing date and geo combinations count as zero sales.
-- If your export uses other column names (for example `Region` or `Total revenue`), pass them:
+- **Missing days stay missing** (NaN) and are reported in `wide.attrs["gaps"]`; they are never treated as zero sales unless you call `to_wide(df, fill_missing="zero")`.
+- To override the detection:
 
 ```python
 load_ga4_csv("my_export.csv", date_col="Date", geo_col="Region", sales_col="Total revenue")
@@ -106,7 +117,7 @@ Keep real exports out of the repo. `data/private/` is git-ignored.
 - **Your inputs are assumptions.** Test length, planned change, target iROAS, margin, budgets, and checklist answers are your assumptions. In the notebook they're labeled **EXAMPLE**.
 - **The sample data is synthetic.** `data/synthetic_ga4_sales_by_dma.csv` covers 20 fictional DMAs over 455 days and comes from the seeded `scripts/make_synthetic_data.py`. It contains no client data and says nothing about real performance.
   - `Example DMA 17` has a deliberate structural break, so it makes a poor control.
-- **Simplifications:** weeks are treated as independent, and the scale factor's own uncertainty is ignored. Read the MDE as a floor, not a promise.
+- **The MDE is a corrected estimate, not a promise.** It includes the scale factor's own error and week-to-week autocorrelation, and it is cross-checked against fake tests in your history. It is still an estimate from past noise. Season: if the test window overlaps November–December you get a warning.
 - **Not covered:** spillover between geos, concurrent promotions, and regional events. Rule those out separately.
 
 ## Repository layout
@@ -116,7 +127,7 @@ geo_pretest/          small Python module (loader, checks, verdict)
 notebooks/            pretest_checks.ipynb (executed, outputs kept)
 data/                 synthetic_ga4_sales_by_dma.csv (synthetic sample)
 scripts/              make_synthetic_data.py (seeded generator)
-tests/                pytest tests on synthetic data
+tests/                pytest tests on synthetic data (+ slow calibration test)
 ```
 
 ## License
