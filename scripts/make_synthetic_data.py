@@ -9,8 +9,9 @@ Structure:
 - shared weekly pattern, an annual pattern with a Nov-Dec peak, and a shared day-to-day shock
 - "Example DMA 17" has a structural break (a level drop from 2025-09-01), so it makes a poor control
 - no test has been run in this data (it is pre-test history)
+- optional --ar: autocorrelated geo-level noise (the committed sample uses ar=0)
 
-Usage: python scripts/make_synthetic_data.py [output_path]
+Usage: python scripts/make_synthetic_data.py [output_path] [--ar 0.5]
 """
 from __future__ import annotations
 
@@ -25,7 +26,15 @@ N_GEOS = 20
 START, END = "2025-01-01", "2026-03-31"
 
 
-def generate(seed: int = SEED) -> pd.DataFrame:
+def generate(seed: int = SEED, ar: float = 0.0) -> pd.DataFrame:
+    """ar: lag-1 autocorrelation of each geo's idiosyncratic daily noise (0 = independent days).
+
+    With ar > 0 the geo-level noise persists from day to day (stationary AR(1) with the same
+    marginal standard deviation), which makes weekly errors autocorrelated. ar=0 reproduces the
+    committed sample exactly.
+    """
+    if not 0.0 <= ar < 1.0:
+        raise ValueError("ar must be in [0, 1).")
     rng = np.random.default_rng(seed)
     dates = pd.date_range(START, END, freq="D")
     n = len(dates)
@@ -49,7 +58,15 @@ def generate(seed: int = SEED) -> pd.DataFrame:
     for g, name in enumerate(geos):
         sensitivity = rng.uniform(0.85, 1.15)                        # how strongly the geo follows the shared pattern
         level = base[g] * common ** sensitivity
-        idio = np.exp(rng.normal(0, noise_sd[g], size=n))
+        draws = rng.normal(0, noise_sd[g], size=n)
+        if ar > 0:
+            e = np.empty(n)
+            e[0] = draws[0]
+            innov = np.sqrt(1 - ar ** 2)
+            for t in range(1, n):
+                e[t] = ar * e[t - 1] + innov * draws[t]
+            draws = e
+        idio = np.exp(draws)
         sales = level * idio
         if name == "Example DMA 17":
             sales = np.where(dates >= "2025-09-01", sales * 0.70, sales)
@@ -72,6 +89,10 @@ def write_ga4_style_csv(df: pd.DataFrame, path: Path) -> None:
 
 
 if __name__ == "__main__":
-    out = Path(sys.argv[1]) if len(sys.argv) > 1 else Path(__file__).resolve().parents[1] / "data" / "synthetic_ga4_sales_by_dma.csv"
-    write_ga4_style_csv(generate(), out)
+    args = sys.argv[1:]
+    ar = 0.0
+    if "--ar" in args:
+        i = args.index("--ar"); ar = float(args[i + 1]); del args[i:i + 2]
+    out = Path(args[0]) if args else Path(__file__).resolve().parents[1] / "data" / "synthetic_ga4_sales_by_dma.csv"
+    write_ga4_style_csv(generate(ar=ar), out)
     print(f"Wrote {out}")
