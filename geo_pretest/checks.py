@@ -505,7 +505,7 @@ def required_spend(wide, test_geos, control_geos, test_days, target_iroas, desig
 
     notes = list(nm.notes)
     if direction == "decrease":
-        notes.append("Holdout (decrease): the baseline includes the sales driven by the spend you turn off; "
+        notes.append("Holdout (decrease): the baseline is the recent run rate with the spend still on, so it includes the sales driven by the spend you turn off; "
                      "that spend x iROAS must create a gap of at least MDE x baseline.")
     else:
         notes.append("Heavy-up (increase): the required spend is extra spend on top of business as usual.")
