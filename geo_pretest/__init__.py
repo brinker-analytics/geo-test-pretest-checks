@@ -12,12 +12,12 @@ from .io import load_ga4_csv, to_wide, missing_days
 from .checks import (
     ComparisonResult, DryRunResult, SpendResult, DecisionChecklist, ChecklistResult,
     NoiseModel, Verdict, comparison_strength, dry_run, required_spend, evaluate_checklist,
-    verdict, noise_model, power, days_needed, Z_ONE_SIDED_90_CONF_80_POWER, Z_ALPHA,
+    verdict, noise_model, power, days_needed, weekly_only_min_days, Z_ONE_SIDED_90_CONF_80_POWER, Z_ALPHA,
 )
 
 __all__ = [
     "load_ga4_csv", "to_wide", "missing_days", "NoiseModel", "Verdict", "noise_model",
-    "power", "days_needed", "Z_ALPHA", "ComparisonResult", "DryRunResult", "SpendResult",
+    "power", "days_needed", "weekly_only_min_days", "Z_ALPHA", "ComparisonResult", "DryRunResult", "SpendResult",
     "DecisionChecklist", "ChecklistResult", "comparison_strength", "dry_run",
     "required_spend", "evaluate_checklist", "verdict", "Z_ONE_SIDED_90_CONF_80_POWER",
 ]

@@ -56,6 +56,7 @@ MAPE_STRONG, MAPE_ACCEPTABLE, MAPE_CAUTION = 0.10, 0.15, 0.20       # >20% = wea
 MIN_HOLDOUT_DAYS = 14
 RHO_CAP = 0.8                                                        # caps the inflation at 3x
 MAX_RECOMMENDED_DAYS = 364
+WEEKLY_ONLY_LENGTH_FACTOR = 1.5   # weekly-only correlation: recommend at least 1.5x the planned length
 MIN_RECOMMENDED_DAYS = 14   # never recommend under 2 weeks; your purchase cycle may need longer
 
 
@@ -286,6 +287,11 @@ def days_needed(lift: float, nm: NoiseModel, target_power: float = POWER, conser
     return None
 
 
+def weekly_only_min_days(test_days: int) -> int:
+    """Minimum length when correlation passes on weekly data only: 1.5x planned, rounded up to whole weeks."""
+    return int(np.ceil(WEEKLY_ONLY_LENGTH_FACTOR * test_days / 7) * 7)
+
+
 # ============================================================================ check 1
 @dataclass
 class ComparisonResult:
@@ -343,8 +349,8 @@ def comparison_strength(wide, test_geos, control_geos, test_days, scale_days=Non
 
     notes = []
     if weekly_only:
-        notes.append("Correlation passes on weekly data only: read the test weekly and use the recommended "
-                     "length from the power score.")
+        notes.append(f"Correlation passes on weekly data only: read the test weekly and plan a longer test "
+                     f"(at least {weekly_only_min_days(test_days)} days, {WEEKLY_ONLY_LENGTH_FACTOR:g}x the planned length).")
     if bw == "weak":
         notes.append("Weekly correlation is weak: choose different controls.")
     if _band_corr(cdr) == "weak" and _band_corr(cwr) == "weak" and not (bd == "weak" and bw == "weak"):
@@ -378,7 +384,7 @@ class DryRunResult:
     scale_factor: float
     placebo_lift: float
     se_corrected: float
-    mde: float
+    mde: float                    # upper end of the MDE range at the actual test length
     interval_low: float
     interval_high: float
     interval_includes_zero: bool
@@ -392,7 +398,7 @@ def dry_run(wide, test_geos, control_geos, test_days, holdout_days=None, scale_d
 
     Hold back a final window about as long as the test (at least 2 weeks). The scale factor and the
     noise model are estimated on the pre-period only, so the holdout never leaks into them.
-    Pass: |placebo lift| < MDE (corrected, at the actual test length) AND the 90% interval
+    Pass: |placebo lift| < the UPPER end of the MDE range (at the actual test length) AND the 90% interval
     (corrected se at the holdout length) includes zero.
     """
     _check_test_days(test_days)
@@ -412,15 +418,16 @@ def dry_run(wide, test_geos, control_geos, test_days, holdout_days=None, scale_d
     se = nm_h.se_corrected
     lo, hi = lift - Z_TWO_SIDED_90 * se, lift + Z_TWO_SIDED_90 * se
     incl = lo <= 0.0 <= hi
-    below = abs(lift) < nm.mde or (nm.mde == 0.0 and abs(lift) < 1e-12)
+    mde_upper = nm.mde_range[1]
+    below = abs(lift) < mde_upper or (mde_upper == 0.0 and abs(lift) < 1e-12)
     notes = []
     if not incl:
         notes.append("Dry run: the placebo shows a 'lift' where nothing changed (interval excludes zero); "
                      "the comparison is drifting or overfit.")
     if not below:
-        notes.append("Dry run: the placebo error is at least as large as the MDE; the test could not separate "
+        notes.append("Dry run: the placebo error is at least as large as the MDE (upper end); the test could not separate "
                      "a real effect from drift.")
-    return DryRunResult(h, hold.index[0], hold.index[-1], k, lift, se, nm.mde, lo, hi, incl, below,
+    return DryRunResult(h, hold.index[0], hold.index[-1], k, lift, se, mde_upper, lo, hi, incl, below,
                         incl and below, notes)
 
 
@@ -460,7 +467,7 @@ class SpendResult:
 def required_spend(wide, test_geos, control_geos, test_days, target_iroas, design="holdout",
                    direction=None, gross_margin=None, planned_change=None, spend_in_test_geos=None,
                    current_spend_in_test_geos=None, comfort_budget=None, scale_days=None,
-                   planned_start=None) -> SpendResult:
+                   planned_start=None, weekly_only: bool = False) -> SpendResult:
     """Check 2: required spend = MDE x baseline treatment sales over the test window / target iROAS.
 
     - MDE from your own noise (see the module docstring), 90% confidence, 80% power, one-sided,
@@ -496,6 +503,8 @@ def required_spend(wide, test_geos, control_geos, test_days, target_iroas, desig
         pw = power(planned_change, nm)
         pwp = power(planned_change, nm, conservative=False)
         rec = days_needed(planned_change, nm)
+        if weekly_only and rec is not None:
+            rec = max(rec, weekly_only_min_days(test_days))
         det = pw >= POWER
     exp_change = suff = None
     if spend_in_test_geos is not None and baseline > 0:
@@ -504,6 +513,9 @@ def required_spend(wide, test_geos, control_geos, test_days, target_iroas, desig
     within = (spend_hi <= comfort_budget) if comfort_budget is not None else None
 
     notes = list(nm.notes)
+    if weekly_only:
+        notes.append(f"Weekly-only correlation: plan at least {weekly_only_min_days(test_days)} days "
+                     f"({WEEKLY_ONLY_LENGTH_FACTOR:g}x the planned {test_days}, rounded up to whole weeks) and read the test weekly.")
     if direction == "decrease":
         notes.append("Holdout (decrease): the baseline is the recent run rate with the spend still on, so it includes the sales driven by the spend you turn off; "
                      "that spend x iROAS must create a gap of at least MDE x baseline.")
@@ -600,7 +612,9 @@ def verdict(comp: ComparisonResult, dry: DryRunResult, spend: SpendResult, check
         if any(key in n for key in ("caution", "weekly data only", "10-15%", "zero-sales", "missing data",
                                     "under a year", "November", "same season", "under 3x", "recent")):
             warnings.append(n)
-    warnings += [n for n in spend.notes if "sanity check" in n]
+    warnings += [n for n in spend.notes if "sanity check" in n or "Weekly-only correlation" in n]
+    if any("Weekly-only correlation" in n for n in spend.notes):   # same advice, keep the specific one
+        warnings = [n for n in warnings if "weekly data only" not in n]
     if check3.status == "dont_test":
         return Verdict("DON'T TEST", check3.notes, warnings)
     reasons = []

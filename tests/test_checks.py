@@ -175,13 +175,48 @@ def test_dry_run_has_no_leakage(wide):
 def test_dry_run_mde_uses_actual_test_length(wide):
     from geo_pretest.checks import noise_model as nmf
     d = dry_run(wide, T, C, 84)
-    assert d.mde == pytest.approx(nmf(wide.iloc[:-84], T, C, 84).mde)
+    assert d.mde == pytest.approx(nmf(wide.iloc[:-84], T, C, 84).mde_range[1])
 
 
 def test_upper_end_equals_corrected_without_cross_checks(wide):
     nm = noise_model(wide.iloc[-120:], T, C, 56)   # history < 2x test, no full year
     assert nm.se_empirical is None and nm.se_same_season is None
     assert nm.se_high == nm.se_corrected
+
+
+def test_dry_run_compares_against_upper_end(wide):
+    import geo_pretest.checks as ck
+    d = dry_run(wide, T, C, 84)
+    nm = ck.noise_model(wide.iloc[:-84], T, C, 84)
+    assert d.mde == pytest.approx(nm.mde_range[1]) and d.mde >= nm.mde
+    # widen the range artificially: the dry run must use the new upper end
+    orig = ck.NoiseModel.mde_range
+    try:
+        ck.NoiseModel.mde_range = property(lambda self: (0.0, 1.0))
+        d2 = dry_run(wide, T, C, 84)
+    finally:
+        ck.NoiseModel.mde_range = orig
+    assert d2.mde == 1.0 and d2.placebo_below_mde
+
+
+def test_weekly_only_recommends_at_least_1_5x(wide):
+    from geo_pretest import weekly_only_min_days
+    assert weekly_only_min_days(84) == 126 and weekly_only_min_days(28) == 42 and weekly_only_min_days(35) == 56
+    big = required_spend(wide, T, C, 84, 2.5, planned_change=0.20, weekly_only=True)
+    assert big.detectable and big.recommended_days == 126
+    assert any("Weekly-only correlation: plan at least 126 days" in n for n in big.notes)
+    plain = required_spend(wide, T, C, 84, 2.5, planned_change=0.20)
+    assert plain.recommended_days < 126
+    weak = required_spend(wide, T, C, 84, 2.5, planned_change=0.5 * plain.mde_high, weekly_only=True)
+    assert weak.recommended_days >= max(126, days_needed(weak.planned_change, weak.noise))
+
+
+def test_weekly_only_is_a_warning_not_a_blocker(wide):
+    comp = comparison_strength(wide, T, C, 84)
+    sp = required_spend(wide, T, C, 84, 2.5, planned_change=0.20, weekly_only=comp.weekly_only)
+    ok = evaluate_checklist(DecisionChecklist("d", True, 1e9, True, True, True), 2.5)
+    v = verdict(comp, dry_run(wide, T, C, 84), sp, ok)
+    assert v.label == "GO" and sum("126 days" in w for w in v.warnings) == 1
 
 
 def test_dry_run_rule_requires_both_conditions(wide):
