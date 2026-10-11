@@ -93,13 +93,20 @@ def load_ga4_csv(path, date_col: str | None = None, geo_col: str | None = None,
     keep = ~(total_mask | notset_mask)
     dates, geos, vals = dates[keep], geos[keep], vals[keep]
 
-    parsed = pd.to_datetime(dates.str.replace("-", "", regex=False), format="%Y%m%d", errors="coerce")
-    other = parsed.isna() & dates.ne("")
-    if other.any():  # e.g. 2026-1-5; ambiguous US/EU slash dates are not guessed
-        parsed[other] = pd.to_datetime(dates[other], format="%Y-%m-%d", errors="coerce")
+    # YYYYMMDD only for exactly 8 digits; anything with '-' is Y-M-D (unpadded allowed). Never strip
+    # dashes: '2026-1-15' would become '2026115' and misparse as 2026-11-05.
+    parsed = pd.Series(pd.NaT, index=dates.index, dtype="datetime64[ns]")
+    compact = dates.str.fullmatch(r"\d{8}")
+    dashed = dates.str.fullmatch(r"\d{4}-\d{1,2}-\d{1,2}")
+    if compact.any():
+        parsed[compact] = pd.to_datetime(dates[compact], format="%Y%m%d", errors="coerce")
+    if dashed.any():
+        parsed[dashed] = pd.to_datetime(dates[dashed], format="%Y-%m-%d", errors="coerce")
     bad = parsed.isna() | vals.isna()
     if bad.any():
-        raise ValueError(f"{int(bad.sum())} rows have an unparseable date or non-numeric {s}.")
+        examples = ", ".join(f"{d!r}" for d in dates[bad].head(3))
+        raise ValueError(f"{int(bad.sum())} rows have an unparseable date (expected YYYYMMDD or YYYY-M-D) "
+                         f"or non-numeric {s}. Examples of dates in those rows: {examples}")
     out = pd.DataFrame({"date": parsed.values, "geo": geos.values, "sales": vals.values.astype(float)})
     out = out.groupby(["date", "geo"], as_index=False)["sales"].sum().sort_values(["date", "geo"])
     report["rows_used"] = len(out)

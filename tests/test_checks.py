@@ -156,6 +156,21 @@ def test_loader_keeps_geo_names_containing_total(tmp_path):
     assert df["sales"].tolist() == [5.0, 6.0] and df.attrs["load_report"]["total_rows_dropped"] == 1
 
 
+def test_loader_unpadded_iso_dates_are_not_misread(tmp_path):
+    p = tmp_path / "d.csv"
+    p.write_text("Date,DMA,Purchase revenue\n2026-1-15,A,1\n20261105,A,2\n2026-01-15,A,4\n")
+    df = load_ga4_csv(p)
+    got = dict(zip(df["date"].dt.strftime("%Y-%m-%d"), df["sales"]))
+    assert got == {"2026-01-15": 5.0, "2026-11-05": 2.0}
+
+
+def test_loader_reports_bad_dates(tmp_path):
+    p = tmp_path / "b.csv"
+    p.write_text("Date,DMA,Purchase revenue\n1/15/2026,A,1\n2026115,A,2\n")
+    with pytest.raises(ValueError, match="2 rows have an unparseable date"):
+        load_ga4_csv(p)
+
+
 def test_mape_bands():
     from geo_pretest.checks import _band_mape
     assert [_band_mape(x) for x in (0.05, 0.12, 0.18, 0.25)] == ["strong", "acceptable", "caution", "weak"]
