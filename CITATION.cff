@@ -1,0 +1,11 @@
+cff-version: 1.2.0
+message: "If you use or cite these checks, please cite them as below."
+title: "geo-test-pretest-checks: three checks before you run a geo test"
+authors:
+  - family-names: Brinker
+    given-names: Eric
+    affiliation: Brinker Analytics
+version: 0.1.0
+date-released: 2026-10-10
+license: MIT
+url: "https://brinkeranalytics.com/insights/before-you-call-a-geo-test-feasible"

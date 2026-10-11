@@ -1,0 +1,11 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.pytest_cache/
+.venv/
+venv/
+env/
+.DS_Store
+# Never commit real sales exports; keep your own data outside the repo or in data/private/
+data/private/
+*.private.csv
