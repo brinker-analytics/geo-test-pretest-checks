@@ -1,23 +1,24 @@
 """geo_pretest: three checks to run on your own geo-level history before a geo test.
 
 Check 1  comparison strength  (correlation, MAPE of the scaled control, out-of-sample dry run)
-Check 2  required spend       (MDE from your own noise, target iROAS, breakeven iROAS)
+Check 2  required spend       (MDE range from your own noise, power score, target vs breakeven iROAS)
 Check 3  can the business act (decision checklist)
 
 Nothing here produces an MDE, iROAS, or duration from generic inputs. Every number is
 computed from the data you load; any value you type in (target iROAS, margin, budget)
 is your assumption and is echoed back as such.
 """
-from .io import load_ga4_csv, to_wide
+from .io import load_ga4_csv, to_wide, missing_days
 from .checks import (
     ComparisonResult, DryRunResult, SpendResult, DecisionChecklist, ChecklistResult,
-    comparison_strength, dry_run, required_spend, evaluate_checklist, verdict,
-    Z_ONE_SIDED_90_CONF_80_POWER,
+    NoiseModel, Verdict, comparison_strength, dry_run, required_spend, evaluate_checklist,
+    verdict, noise_model, power, days_needed, Z_ONE_SIDED_90_CONF_80_POWER, Z_ALPHA,
 )
 
 __all__ = [
-    "load_ga4_csv", "to_wide", "ComparisonResult", "DryRunResult", "SpendResult",
+    "load_ga4_csv", "to_wide", "missing_days", "NoiseModel", "Verdict", "noise_model",
+    "power", "days_needed", "Z_ALPHA", "ComparisonResult", "DryRunResult", "SpendResult",
     "DecisionChecklist", "ChecklistResult", "comparison_strength", "dry_run",
     "required_spend", "evaluate_checklist", "verdict", "Z_ONE_SIDED_90_CONF_80_POWER",
 ]
-__version__ = "0.1.0"
+__version__ = "0.2.0"

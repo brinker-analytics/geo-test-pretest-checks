@@ -1,13 +1,29 @@
 """The three pre-launch checks.
 
-Thresholds are Eric Brinker's "how I read it" guidance, not universal rules. Every one of
-them is a parameter you can change.
+Thresholds are Eric Brinker's "how I read it" guidance, not universal rules. Every one of them
+is a parameter you can change.
 
-Statistical approximation used throughout: the lift estimate's noise comes from weekly
-percentage errors between the treatment series and the scaled control in your own
-pre-period history, with weeks treated as independent. That is a deliberately simple,
-transparent readiness check. It is not a substitute for the design and analysis methods
-in GeoLift, Trimmed Match, or Meridian GeoX.
+Noise model (how the MDE is estimated from your own history)
+------------------------------------------------------------
+1. Out-of-sample weekly errors (rolling): for each week in your history, fit the scale factor
+   on the preceding `scale_days` days, predict the next 7 days, and record the % error.
+   Their standard deviation is `sd`.
+2. Scale-factor error is included:  se = sd * sqrt(7/test_days + 7/scale_days).
+3. Autocorrelation: se is inflated by sqrt((1+rho)/(1-rho)), where rho is the lag-1
+   autocorrelation of the weekly residuals (floored at 0, capped at RHO_CAP).
+   This "corrected" se is the point estimate:  MDE = z * se,  z = z(90% one-sided) + z(80% power).
+4. Cross-checks that widen the reported MDE RANGE:
+   - empirical fake tests: rolling placebo tests of the full test length inside your history
+     (only when history is at least 3x the test length)
+   - same-season error (when history covers a year before the planned start)
+   The range runs from the lowest to the highest of these estimates. Decisions (detectability,
+   power score, recommended length) use the conservative (upper) end.
+
+On the seeded synthetic data the corrected point estimate is calibrated: the false-positive
+rate of a 90% one-sided test is close to 10% and power at the MDE close to 80% (see
+tests/test_calibration.py). That is a check of the method on synthetic data, not a guarantee for
+your data. This is a readiness gate, not a substitute for the design and analysis methods in
+GeoLift, Trimmed Match, or Meridian GeoX.
 """
 from __future__ import annotations
 
@@ -18,64 +34,226 @@ import numpy as np
 import pandas as pd
 from scipy.stats import norm
 
-# 90% confidence, one-sided (lift only) and 80% power.
 ALPHA_ONE_SIDED = 0.10
 POWER = 0.80
-Z_ONE_SIDED_90_CONF_80_POWER = float(norm.ppf(1 - ALPHA_ONE_SIDED) + norm.ppf(POWER))  # ~2.12
-Z_TWO_SIDED_90 = float(norm.ppf(0.95))  # ~1.645, for the placebo interval
+Z_ALPHA = float(norm.ppf(1 - ALPHA_ONE_SIDED))                      # ~1.2816
+Z_ONE_SIDED_90_CONF_80_POWER = float(Z_ALPHA + norm.ppf(POWER))     # ~2.1232
+Z_TWO_SIDED_90 = float(norm.ppf(0.95))                               # ~1.645, placebo interval
 
 # "How I read it" bands (guidance, not rules).
 CORR_ACCEPTABLE, CORR_STRONG = 0.90, 0.95
-MAPE_ACCEPTABLE, MAPE_STRONG = 0.15, 0.10
-MIN_HOLDOUT_DAYS = 14  # the dry-run holdout is about the test length, and at least 2 weeks
+MAPE_STRONG, MAPE_ACCEPTABLE, MAPE_CAUTION = 0.10, 0.15, 0.20       # >20% = weak
+MIN_HOLDOUT_DAYS = 14
+RHO_CAP = 0.8                                                        # caps the inflation at 3x
+MAX_RECOMMENDED_DAYS = 364
+MIN_RECOMMENDED_DAYS = 14   # never recommend under 2 weeks; your purchase cycle may need longer
 
 
-# ----------------------------------------------------------------------------- helpers
+# ============================================================================ helpers
 def _series(wide: pd.DataFrame, geos: Sequence[str]) -> pd.Series:
+    if not geos:
+        raise ValueError("Pass at least one geo.")
     missing = [g for g in geos if g not in wide.columns]
     if missing:
         raise KeyError(f"Geos not in data: {missing}")
-    if not geos:
-        raise ValueError("Pass at least one geo.")
-    return wide[list(geos)].sum(axis=1)
+    # A day is missing for the cell if any geo in it is missing that day.
+    return wide[list(geos)].sum(axis=1, min_count=len(geos)).where(wide[list(geos)].notna().all(axis=1))
 
 
 def _weekly(s: pd.Series) -> pd.Series:
-    """Sum to Monday-Sunday weeks and drop partial weeks at either end."""
+    """Sum to Monday-Sunday weeks; drop weeks with fewer than 7 observed days (partial or gappy)."""
     grouped = s.resample("W-SUN")
-    sums, counts = grouped.sum(), grouped.count()
+    sums, counts = grouped.sum(min_count=1), grouped.count()
     return sums[counts == 7]
 
 
-def _mape(actual: pd.Series, predicted: pd.Series) -> float:
-    mask = actual != 0
-    return float((np.abs(actual[mask] - predicted[mask]) / actual[mask]).mean())
-
-
-def _band(value: float, acceptable: float, strong: float, higher_is_better: bool) -> str:
-    if higher_is_better:
-        return "strong" if value >= strong else "acceptable" if value >= acceptable else "weak"
-    return "strong" if value <= strong else "acceptable" if value <= acceptable else "weak"
-
-
-def _scale_factor(treat: pd.Series, ctrl: pd.Series, days: int) -> float:
-    t, c = treat.iloc[-days:].sum(), ctrl.iloc[-days:].sum()
-    if c <= 0:
-        raise ValueError("Control has no sales in the scale-factor period.")
-    return float(t / c)
-
-
-def _weekly_pct_errors(treat: pd.Series, scaled_ctrl: pd.Series) -> pd.Series:
-    tw, cw = _weekly(treat), _weekly(scaled_ctrl)
-    return (tw / cw - 1.0).replace([np.inf, -np.inf], np.nan).dropna()
-
-
 def _check_test_days(test_days: int) -> None:
-    if test_days < 7:
-        raise ValueError("test_days is your planned test length in days; use at least 7.")
+    if test_days < 7 or test_days % 7:
+        raise ValueError("test_days must be a whole number of weeks (a multiple of 7, at least 7). "
+                         "Weekly reads and the noise model work in full weeks.")
 
 
-# ----------------------------------------------------------------------------- check 1
+def _ratio_k(t: pd.Series, c: pd.Series) -> float:
+    m = t.notna() & c.notna()
+    cs = c[m].sum()
+    if cs <= 0:
+        raise ValueError("Control has no sales in the scale-factor period.")
+    return float(t[m].sum() / cs)
+
+
+def _band_corr(v: float) -> str:
+    return "strong" if v >= CORR_STRONG else "acceptable" if v >= CORR_ACCEPTABLE else "weak"
+
+
+def _band_mape(v: float) -> str:
+    if v < MAPE_STRONG:
+        return "strong"
+    if v <= MAPE_ACCEPTABLE:
+        return "acceptable"
+    if v <= MAPE_CAUTION:
+        return "caution"
+    return "weak"
+
+
+def _mape_wape(actual: pd.Series, pred: pd.Series):
+    m = actual.notna() & pred.notna()
+    a, p = actual[m], pred[m]
+    zero = int((a == 0).sum())
+    nz = a != 0
+    mape = float((np.abs(a[nz] - p[nz]) / a[nz]).mean()) if nz.any() else float("nan")
+    wape = float(np.abs(a - p).sum() / a.sum()) if a.sum() > 0 else float("nan")
+    return mape, wape, zero
+
+
+def _oos_weekly_errors(treat: pd.Series, ctrl: pd.Series, scale_days: int) -> pd.Series:
+    """Rolling out-of-sample weekly % errors: k fit on the preceding scale_days days, predict 7 days."""
+    out, idx = [], []
+    n = len(treat)
+    for e in range(scale_days, n - 6, 7):
+        tw, cw = treat.iloc[e:e + 7], ctrl.iloc[e:e + 7]
+        if tw.isna().any() or cw.isna().any():
+            continue
+        try:
+            k = _ratio_k(treat.iloc[e - scale_days:e], ctrl.iloc[e - scale_days:e])
+        except ValueError:
+            continue
+        denom = cw.sum() * k
+        if denom > 0:
+            out.append(tw.sum() / denom - 1.0)
+            idx.append(treat.index[e])
+    return pd.Series(out, index=pd.DatetimeIndex(idx), dtype=float)
+
+
+def _residual_rho(treat: pd.Series, ctrl: pd.Series) -> float:
+    """Lag-1 autocorrelation of in-sample weekly residuals, floored at 0 and capped at RHO_CAP."""
+    k = _ratio_k(treat, ctrl)
+    tw, cw = _weekly(treat), _weekly(ctrl * k)
+    common = tw.index.intersection(cw.index)
+    e = (tw[common] / cw[common] - 1.0).to_numpy()
+    if len(e) < 8:
+        return 0.0
+    e = e - e.mean()
+    if np.sum(e * e) == 0:
+        return 0.0
+    r = float(np.sum(e[1:] * e[:-1]) / np.sum(e * e))
+    return float(min(max(r, 0.0), RHO_CAP))
+
+
+def _empirical_fake_test_sd(treat, ctrl, test_days, scale_days) -> tuple[float, int]:
+    """SD of rolling placebo 'lifts' of the full test length inside the history (step 7 days)."""
+    lifts = []
+    for e in range(scale_days, len(treat) - test_days + 1, 7):
+        tw, cw = treat.iloc[e:e + test_days], ctrl.iloc[e:e + test_days]
+        if tw.isna().any() or cw.isna().any():
+            continue
+        try:
+            k = _ratio_k(treat.iloc[e - scale_days:e], ctrl.iloc[e - scale_days:e])
+        except ValueError:
+            continue
+        lifts.append(tw.sum() / (cw.sum() * k) - 1.0)
+    return (float(np.std(lifts, ddof=1)), len(lifts)) if len(lifts) >= 3 else (float("nan"), len(lifts))
+
+
+# ============================================================================ noise model
+@dataclass
+class NoiseModel:
+    test_days: int
+    scale_days: int
+    weekly_sd: float              # SD of out-of-sample weekly % errors
+    n_weeks: int
+    rho: float                    # lag-1 autocorrelation used (floored at 0, capped)
+    ar_inflation: float
+    se_base: float                # with scale-factor error, no autocorrelation inflation
+    se_corrected: float           # point estimate (scale-factor error + autocorrelation)
+    se_empirical: Optional[float]
+    n_fake_tests: int
+    se_same_season: Optional[float]
+    se_low: float
+    se_high: float
+    notes: list = field(default_factory=list)
+
+    @property
+    def mde(self) -> float:
+        return Z_ONE_SIDED_90_CONF_80_POWER * self.se_corrected
+
+    @property
+    def mde_range(self) -> tuple:
+        return (Z_ONE_SIDED_90_CONF_80_POWER * self.se_low, Z_ONE_SIDED_90_CONF_80_POWER * self.se_high)
+
+    def se_at(self, days: int, conservative: bool = True) -> float:
+        """Projected se for another test length (scale period = max(scale_days, days))."""
+        s = max(self.scale_days, days)
+        base = self.weekly_sd * np.sqrt(7 / days + 7 / s) * self.ar_inflation
+        ratio = (self.se_high / self.se_corrected) if conservative else 1.0
+        return float(base * ratio)
+
+
+def noise_model(wide, test_geos, control_geos, test_days, scale_days=None,
+                planned_start: Optional[pd.Timestamp] = None) -> NoiseModel:
+    """Estimate the lift-estimate noise for a test of `test_days` from your own history."""
+    _check_test_days(test_days)
+    scale_days = scale_days or test_days
+    if scale_days < test_days:
+        raise ValueError("scale_days must be at least as long as the test.")
+    treat, ctrl = _series(wide, test_geos), _series(wide, control_geos)
+    errs = _oos_weekly_errors(treat, ctrl, scale_days)
+    if len(errs) < 6:
+        raise ValueError("Too little history for a noise estimate: need at least 6 out-of-sample weeks "
+                         "after the scale-factor period.")
+    sd = float(errs.std(ddof=1))
+    rho = _residual_rho(treat, ctrl)
+    infl = float(np.sqrt((1 + rho) / (1 - rho)))
+    base = sd * np.sqrt(7 / test_days + 7 / scale_days)
+    corrected = base * infl
+    notes = []
+
+    emp, n_fake = (float("nan"), 0)
+    if treat.notna().sum() >= 3 * test_days:
+        emp, n_fake = _empirical_fake_test_sd(treat, ctrl, test_days, scale_days)
+    else:
+        notes.append("History is under 3x the test length: no empirical fake-test estimate.")
+
+    season_se = None
+    start = pd.Timestamp(planned_start) if planned_start is not None else treat.index.max() + pd.Timedelta(days=1)
+    last_year = start - pd.Timedelta(days=365)
+    if treat.index.min() <= last_year - pd.Timedelta(days=scale_days):
+        same = errs[(errs.index >= last_year) & (errs.index < last_year + pd.Timedelta(days=test_days))]
+        if len(same) >= 2:
+            season_se = float(same.std(ddof=1) * np.sqrt(7 / test_days + 7 / scale_days) * infl)
+            if season_se > corrected * 1.25:
+                notes.append("Error in the same season last year was notably higher: expect a larger MDE in that season.")
+    window = pd.date_range(start, periods=test_days, freq="D")
+    if ((window.month == 11) | (window.month == 12)).any():
+        notes.append("The planned window overlaps November-December: holiday peaks make the comparison less stable.")
+
+    candidates = [x for x in (corrected, emp, season_se) if x is not None and np.isfinite(x)]
+    if len(candidates) > 1:
+        lo, hi = min(candidates), max(candidates)
+    else:
+        lo, hi = base, corrected
+    return NoiseModel(test_days, scale_days, sd, len(errs), rho, infl, float(base), float(corrected),
+                      emp if np.isfinite(emp) else None, n_fake, season_se, float(lo), float(hi), notes)
+
+
+def power(lift: float, nm: NoiseModel, days: Optional[int] = None, conservative: bool = True) -> float:
+    """Power score: P(detect) = Phi(|lift|/se - z_alpha) at 90% one-sided confidence."""
+    se = nm.se_at(days or nm.test_days, conservative=conservative)
+    return float(norm.cdf(abs(lift) / se - Z_ALPHA))
+
+
+def days_needed(lift: float, nm: NoiseModel, target_power: float = POWER, conservative: bool = True) -> Optional[int]:
+    """Shortest test (whole weeks, at least 2) reaching the target power for this lift.
+
+    Returns None if no length up to MAX_RECOMMENDED_DAYS gets there. This is a power floor only:
+    the customer consideration cycle can require a longer test.
+    """
+    for d in range(MIN_RECOMMENDED_DAYS, MAX_RECOMMENDED_DAYS + 1, 7):
+        if power(lift, nm, d, conservative) >= target_power:
+            return d
+    return None
+
+
+# ============================================================================ check 1
 @dataclass
 class ComparisonResult:
     test_geos: list
@@ -86,71 +264,78 @@ class ComparisonResult:
     scale_factor: float
     corr_daily: float
     corr_weekly: float
+    corr_daily_recent: float
+    corr_weekly_recent: float
+    recent_days: int
     mape_daily: float
     mape_weekly: float
+    wape_daily: float
+    wape_weekly: float
+    zero_days_excluded: int
+    missing_days: int
     corr_daily_band: str
     corr_weekly_band: str
     mape_weekly_band: str
     history_covers_test: bool
     history_covers_year: bool
-    passes: bool
     weekly_only: bool
+    passes: bool
     notes: list = field(default_factory=list)
 
 
-def comparison_strength(
-    wide: pd.DataFrame,
-    test_geos: Sequence[str],
-    control_geos: Sequence[str],
-    test_days: int,
-    scale_days: Optional[int] = None,
-) -> ComparisonResult:
-    """Check 1a: correlation (daily and weekly, over the full history) and MAPE of the scaled control.
-
-    The scale factor comes from the most recent `scale_days` days, which must be at least as
-    long as the planned test (default: exactly the test length).
-    """
+def comparison_strength(wide, test_geos, control_geos, test_days, scale_days=None) -> ComparisonResult:
+    """Check 1a: correlation (full history and recent ~2x test length; daily and weekly),
+    MAPE and WAPE of the scaled control (scale factor from the latest period >= test length)."""
     _check_test_days(test_days)
     scale_days = scale_days or test_days
     if scale_days < test_days:
         raise ValueError("scale_days must be at least as long as the test.")
     treat, ctrl = _series(wide, test_geos), _series(wide, control_geos)
-    k = _scale_factor(treat, ctrl, scale_days)
+    k = _ratio_k(treat.iloc[-scale_days:], ctrl.iloc[-scale_days:])
     scaled = ctrl * k
+    recent = min(len(treat), 2 * test_days)
 
-    corr_d = float(treat.corr(ctrl))
-    corr_w = float(_weekly(treat).corr(_weekly(ctrl)))
-    mape_d = _mape(treat, scaled)
-    mape_w = _mape(_weekly(treat), _weekly(scaled))
-    days = len(treat)
+    cd, cw = float(treat.corr(ctrl)), float(_weekly(treat).corr(_weekly(ctrl)))
+    cdr = float(treat.iloc[-recent:].corr(ctrl.iloc[-recent:]))
+    cwr = float(_weekly(treat.iloc[-recent:]).corr(_weekly(ctrl.iloc[-recent:])))
+    md, wd, zd = _mape_wape(treat, scaled)
+    mw, ww, _ = _mape_wape(_weekly(treat), _weekly(scaled))
+    observed = int((treat.notna() & ctrl.notna()).sum())
+    missing = int(len(treat) - observed)
 
-    cd = _band(corr_d, CORR_ACCEPTABLE, CORR_STRONG, True)
-    cw = _band(corr_w, CORR_ACCEPTABLE, CORR_STRONG, True)
-    mw = _band(mape_w, MAPE_ACCEPTABLE, MAPE_STRONG, False)
-    weekly_only = cd == "weak" and cw != "weak"
-    passes = cd != "weak" and cw != "weak" and mw != "weak" and days >= test_days
+    bd, bw, bm = _band_corr(cd), _band_corr(cw), _band_mape(mw)
+    weekly_only = bd == "weak" and bw != "weak"
+    passes = not (bd == "weak" and bw == "weak") and bm != "weak" and observed >= test_days
 
     notes = []
     if weekly_only:
-        notes.append("Correlation passes only on weekly data: plan a longer test and read it weekly.")
-    if cd == "weak" and cw == "weak":
+        notes.append("Correlation passes on weekly data only: read the test weekly and use the recommended "
+                     "length from the power score.")
+    if bd == "weak" and bw == "weak":
         notes.append("Correlation is below 90% on daily and weekly data: choose different controls.")
-    if mw == "weak":
-        notes.append("Weekly MAPE of the scaled control is above 15%: the control does not track closely enough.")
-    elif mw == "acceptable":
-        notes.append("Weekly MAPE is between 10% and 15%: acceptable, under 10% is preferred.")
-    if days < test_days:
+    if _band_corr(cdr) == "weak" and _band_corr(cwr) == "weak" and not (bd == "weak" and bw == "weak"):
+        notes.append(f"Correlation over the most recent {recent} days is weak on both daily and weekly data: "
+                     "the relationship may have changed recently.")
+    if bm == "weak":
+        notes.append("Weekly MAPE of the scaled control is above 20%: the control does not track closely enough.")
+    elif bm == "caution":
+        notes.append("Weekly MAPE is 15-20% (caution): not a failure, but the MDE will be higher and the result less certain.")
+    elif bm == "acceptable":
+        notes.append("Weekly MAPE is 10-15%: acceptable; under 10% is preferred.")
+    if zd:
+        notes.append(f"{zd} zero-sales day(s) excluded from MAPE (WAPE includes them).")
+    if missing:
+        notes.append(f"{missing} day(s) with missing data in the test or control cell were left out (not zero-filled).")
+    if observed < test_days:
         notes.append("History is shorter than the test: collect more history first.")
-    if days < 365:
+    if len(treat) < 365:
         notes.append("History is under a year: it may not include a seasonal peak.")
-    return ComparisonResult(
-        list(test_geos), list(control_geos), test_days, days, scale_days, k,
-        corr_d, corr_w, mape_d, mape_w, cd, cw, mw,
-        days >= test_days, days >= 365, passes, weekly_only, notes,
-    )
+    return ComparisonResult(list(test_geos), list(control_geos), test_days, len(treat), scale_days, k,
+                            cd, cw, cdr, cwr, recent, md, mw, wd, ww, zd, missing, bd, bw, bm,
+                            observed >= test_days, len(treat) >= 365, weekly_only, passes, notes)
 
 
-# ----------------------------------------------------------------------------- check 1b
+# ============================================================================ check 1b
 @dataclass
 class DryRunResult:
     holdout_days: int
@@ -158,159 +343,170 @@ class DryRunResult:
     holdout_end: pd.Timestamp
     scale_factor: float
     placebo_lift: float
+    se_corrected: float
+    mde: float
     interval_low: float
     interval_high: float
-    planned_change: float
     interval_includes_zero: bool
-    error_below_planned_change: bool
+    placebo_below_mde: bool
     passes: bool
     notes: list = field(default_factory=list)
 
 
-def dry_run(
-    wide: pd.DataFrame,
-    test_geos: Sequence[str],
-    control_geos: Sequence[str],
-    test_days: int,
-    planned_change: float,
-    holdout_days: Optional[int] = None,
-) -> DryRunResult:
+def dry_run(wide, test_geos, control_geos, test_days, holdout_days=None, scale_days=None) -> DryRunResult:
     """Check 1b: short-form out-of-sample dry run on recent weeks when nothing changed.
 
-    Fit the scale factor on the pre-period (its final `test_days` days), hold back a final
-    window about as long as the test (at least 2 weeks), and predict it. Nothing changed in
-    that window, so the placebo lift should be about zero.
-
-    Pass: the 90% placebo lift interval includes zero AND the placebo error is smaller than the
-    planned change. `planned_change` is your own assumption (the lift you plan to create).
+    Hold back a final window about as long as the test (at least 2 weeks). The scale factor and the
+    noise model are estimated on the pre-period only, so the holdout never leaks into them.
+    Pass: |placebo lift| < MDE (corrected) AND the 90% interval (corrected se) includes zero.
     """
     _check_test_days(test_days)
-    if planned_change <= 0:
-        raise ValueError("planned_change is the lift you plan to create, as a fraction (e.g. 0.15).")
-    holdout_days = max(holdout_days or test_days, MIN_HOLDOUT_DAYS)
-    treat, ctrl = _series(wide, test_geos), _series(wide, control_geos)
-    if len(treat) < holdout_days + test_days + 28:
-        raise ValueError("Not enough history for a dry run: need the holdout plus a pre-period.")
-    pre_t, pre_c = treat.iloc[:-holdout_days], ctrl.iloc[:-holdout_days]
-    hold_t, hold_c = treat.iloc[-holdout_days:], ctrl.iloc[-holdout_days:]
-
-    k = _scale_factor(pre_t, pre_c, test_days)
-    lift = float(hold_t.sum() / (hold_c.sum() * k) - 1.0)
-    errors = _weekly_pct_errors(pre_t, pre_c * k)
-    weeks = holdout_days / 7.0
-    se = float(errors.std(ddof=1) / np.sqrt(weeks))
-    low, high = lift - Z_TWO_SIDED_90 * se, lift + Z_TWO_SIDED_90 * se
-    incl_zero = low <= 0.0 <= high
-    below = abs(lift) < planned_change
+    h = max(holdout_days or test_days, MIN_HOLDOUT_DAYS)
+    if h % 7:
+        raise ValueError("holdout_days must be a multiple of 7.")
+    scale_days = max(scale_days or test_days, h)
+    pre = wide.iloc[:-h]
+    hold = wide.iloc[-h:]
+    nm = noise_model(pre, test_geos, control_geos, h, scale_days=scale_days)
+    pt, pc = _series(pre, test_geos), _series(pre, control_geos)
+    k = _ratio_k(pt.iloc[-scale_days:], pc.iloc[-scale_days:])
+    ht, hc = _series(hold, test_geos), _series(hold, control_geos)
+    m = ht.notna() & hc.notna()
+    lift = float(ht[m].sum() / (hc[m].sum() * k) - 1.0)
+    se = nm.se_corrected
+    lo, hi = lift - Z_TWO_SIDED_90 * se, lift + Z_TWO_SIDED_90 * se
+    incl = lo <= 0.0 <= hi
+    below = abs(lift) < nm.mde or (nm.mde == 0.0 and abs(lift) < 1e-12)
     notes = []
-    if not incl_zero:
-        notes.append("The placebo shows a 'lift' where nothing changed: the comparison is drifting or overfit.")
+    if not incl:
+        notes.append("Dry run: the placebo shows a 'lift' where nothing changed (interval excludes zero); "
+                     "the comparison is drifting or overfit.")
     if not below:
-        notes.append("Placebo error is at least as large as the planned change: the test could not tell them apart.")
-    return DryRunResult(
-        holdout_days, hold_t.index[0], hold_t.index[-1], k, lift, low, high, planned_change,
-        incl_zero, below, incl_zero and below, notes,
-    )
+        notes.append("Dry run: the placebo error is at least as large as the MDE; the test could not separate "
+                     "a real effect from drift.")
+    return DryRunResult(h, hold.index[0], hold.index[-1], k, lift, se, nm.mde, lo, hi, incl, below,
+                        incl and below, notes)
 
 
-# ----------------------------------------------------------------------------- check 2
+# ============================================================================ check 2
 @dataclass
 class SpendResult:
     test_days: int
     design: str
-    weekly_error_sd: float
+    direction: str
+    noise: NoiseModel
     mde: float
+    mde_low: float
+    mde_high: float
     baseline_treatment_sales: float
     required_incremental_sales: float
-    target_iroas: float
     required_spend: float
+    required_spend_low: float
+    required_spend_high: float
+    target_iroas: float
     gross_margin: Optional[float]
     breakeven_iroas: Optional[float]
     target_below_breakeven: Optional[bool]
     planned_change: Optional[float]
+    power_at_planned_change: Optional[float]
+    power_at_planned_change_point: Optional[float]
+    recommended_days: Optional[int]
     detectable: Optional[bool]
     spend_in_test_geos: Optional[float]
+    expected_change_from_spend: Optional[float]
     holdout_spend_sufficient: Optional[bool]
+    current_spend_in_test_geos: Optional[float]
     comfort_budget: Optional[float]
     within_comfort_budget: Optional[bool]
     notes: list = field(default_factory=list)
 
 
-def required_spend(
-    wide: pd.DataFrame,
-    test_geos: Sequence[str],
-    control_geos: Sequence[str],
-    test_days: int,
-    target_iroas: float,
-    design: str = "holdout",
-    gross_margin: Optional[float] = None,
-    planned_change: Optional[float] = None,
-    spend_in_test_geos: Optional[float] = None,
-    comfort_budget: Optional[float] = None,
-) -> SpendResult:
+def required_spend(wide, test_geos, control_geos, test_days, target_iroas, design="holdout",
+                   direction=None, gross_margin=None, planned_change=None, spend_in_test_geos=None,
+                   current_spend_in_test_geos=None, comfort_budget=None, scale_days=None,
+                   planned_start=None) -> SpendResult:
     """Check 2: required spend = MDE x baseline treatment sales over the test window / target iROAS.
 
-    - MDE: from your own noise (weekly % error of the scaled control), 90% confidence,
-      80% power, one-sided.
-    - Baseline treatment sales: the treatment geos' recent run rate x test_days.
-    - target_iroas is revenue-based and is YOUR assumption. If gross_margin is given, it is compared
-      with the margin-based breakeven iROAS (1 / gross margin).
-    - design='holdout': the spend you turn off in the test geos over the window
-      (spend_in_test_geos) must be at least the required spend to create the MDE gap at the
-      target iROAS. design='heavy-up': the required spend is extra spend on top of business as usual.
+    - MDE from your own noise (see the module docstring), 90% confidence, 80% power, one-sided,
+      reported as a range; the required spend is reported as the matching range.
+    - Baseline treatment sales = the treatment geos' recent run rate x test_days. For a holdout this
+      baseline INCLUDES the sales driven by the spend you will turn off; the gap you must create is
+      MDE x that baseline, i.e. spend_off x iROAS >= MDE x baseline (direction='decrease').
+    - Heavy-up (direction='increase'): the required spend is extra spend on top of business as usual.
+      current_spend_in_test_geos enables a sanity check on how big that increase is.
+    - target_iroas is revenue-basis and YOUR assumption; with gross_margin it is compared with the
+      margin-based breakeven iROAS (1 / gross margin).
     """
     _check_test_days(test_days)
     if target_iroas <= 0:
         raise ValueError("target_iroas must be positive (revenue per $1 of spend).")
     if design not in ("holdout", "heavy-up"):
         raise ValueError("design must be 'holdout' or 'heavy-up'.")
-    treat, ctrl = _series(wide, test_geos), _series(wide, control_geos)
-    k = _scale_factor(treat, ctrl, test_days)
-    errors = _weekly_pct_errors(treat, ctrl * k)
-    sd = float(errors.std(ddof=1))
-    mde = Z_ONE_SIDED_90_CONF_80_POWER * sd / np.sqrt(test_days / 7.0)
-    baseline = float(treat.iloc[-test_days:].mean() * test_days)
-    incr = mde * baseline
-    spend = incr / target_iroas
+    direction = direction or ("decrease" if design == "holdout" else "increase")
+    if direction not in ("increase", "decrease"):
+        raise ValueError("direction must be 'increase' or 'decrease'.")
+    nm = noise_model(wide, test_geos, control_geos, test_days, scale_days, planned_start)
+    treat = _series(wide, test_geos)
+    recent = treat.iloc[-test_days:]
+    baseline = float(recent.mean() * test_days)
+    mde_lo, mde_hi = nm.mde_range
+    incr = nm.mde * baseline
+    spend, spend_lo, spend_hi = incr / target_iroas, mde_lo * baseline / target_iroas, mde_hi * baseline / target_iroas
 
     breakeven = (1.0 / gross_margin) if gross_margin else None
     below_be = (target_iroas < breakeven) if breakeven else None
-    detectable = (mde <= planned_change) if planned_change else None
-    sufficient = (spend_in_test_geos >= spend) if (design == "holdout" and spend_in_test_geos is not None) else None
-    within = (spend <= comfort_budget) if comfort_budget is not None else None
+    pw = pwp = rec = det = None
+    if planned_change:
+        pw = power(planned_change, nm)
+        pwp = power(planned_change, nm, conservative=False)
+        rec = days_needed(planned_change, nm)
+        det = pw >= POWER
+    exp_change = suff = None
+    if spend_in_test_geos is not None and baseline > 0:
+        exp_change = (spend_in_test_geos * target_iroas / baseline) * (-1 if direction == "decrease" else 1)
+        suff = spend_in_test_geos >= spend_hi
+    within = (spend_hi <= comfort_budget) if comfort_budget is not None else None
 
-    notes = []
-    if design == "holdout":
-        notes.append("Holdout: the spend you turn off in the test geos must be at least the required spend.")
+    notes = list(nm.notes)
+    if direction == "decrease":
+        notes.append("Holdout (decrease): the baseline includes the sales driven by the spend you turn off; "
+                     "that spend x iROAS must create a gap of at least MDE x baseline.")
     else:
-        notes.append("Heavy-up: the required spend is extra spend on top of business as usual.")
+        notes.append("Heavy-up (increase): the required spend is extra spend on top of business as usual.")
+        if current_spend_in_test_geos is None:
+            notes.append("Heavy-up sanity check: enter current spend in the test geos to see how large the increase is.")
+        elif current_spend_in_test_geos > 0 and spend_hi > current_spend_in_test_geos:
+            notes.append(f"Heavy-up sanity check: the extra spend is {spend_hi / current_spend_in_test_geos:.1f}x current "
+                         "spend in the test geos; iROAS may not hold at that scale.")
     if below_be:
         notes.append("Target iROAS is below the margin-based breakeven: a 'win' at target would still lose money.")
-    if detectable is False:
-        notes.append("The MDE is larger than the planned change: the test could not detect it. Change the cells, length, or hypothesis.")
-    if sufficient is False:
+    if det is False:
+        msg = f"Power at the planned change is {pw:.0%} (below 80%)."
+        msg += (f" Recommended length: {rec} days." if rec else
+                f" No length up to {MAX_RECOMMENDED_DAYS} days reaches 80%: change the cells or the hypothesis.")
+        notes.append(msg)
+    if suff is False:
         notes.append("The spend you would turn off is too small to create the MDE gap at the target iROAS.")
     if within is False:
-        notes.append("Required spend is above leadership's comfort-zone budget.")
+        notes.append("Required spend (upper end of the range) is above leadership's comfort-zone budget.")
     notes.append("Baseline uses the recent run rate; adjust if the test window falls in a seasonal peak or trough.")
-    return SpendResult(
-        test_days, design, sd, float(mde), baseline, float(incr), target_iroas, float(spend),
-        gross_margin, breakeven, below_be, planned_change, detectable, spend_in_test_geos,
-        sufficient, comfort_budget, within, notes,
-    )
+    return SpendResult(test_days, design, direction, nm, nm.mde, mde_lo, mde_hi, baseline, incr, spend,
+                       spend_lo, spend_hi, target_iroas, gross_margin, breakeven, below_be, planned_change,
+                       pw, pwp, rec, det, spend_in_test_geos, exp_change, suff, current_spend_in_test_geos,
+                       comfort_budget, within, notes)
 
 
-# ----------------------------------------------------------------------------- check 3
+# ============================================================================ check 3
 @dataclass
 class DecisionChecklist:
     """Answer these with the decision maker BEFORE launch. None means 'not answered yet'."""
-    decision: str = ""                                   # the budget decision this test informs
-    decision_maker_precleared: Optional[bool] = None     # cleared with the decision maker in advance?
-    comfort_budget: Optional[float] = None               # leadership's comfort-zone budget for the test
-    would_roll_out_nationally: Optional[bool] = None     # would they roll a winner out nationally?
-    stepped_plan_agreed: Optional[bool] = None           # the stepped game plan below is agreed
-    null_means_not_proven_agreed: Optional[bool] = None  # everyone agrees a null = "not proven"
-    band: float = 0.20                                   # act if iROAS lands within +/- band of expectation
+    decision: str = ""
+    decision_maker_precleared: Optional[bool] = None
+    comfort_budget: Optional[float] = None
+    would_roll_out_nationally: Optional[bool] = None
+    stepped_plan_agreed: Optional[bool] = None
+    null_means_not_proven_agreed: Optional[bool] = None
+    band: float = 0.20
 
 
 @dataclass
@@ -337,8 +533,7 @@ def evaluate_checklist(c: DecisionChecklist, target_iroas: float) -> ChecklistRe
     if c.decision_maker_precleared is False or c.would_roll_out_nationally is False:
         return ChecklistResult("dont_test", plan, notes)
     unanswered = [n for n in ("decision_maker_precleared", "would_roll_out_nationally",
-                              "stepped_plan_agreed", "null_means_not_proven_agreed")
-                  if getattr(c, n) is None]
+                              "stepped_plan_agreed", "null_means_not_proven_agreed") if getattr(c, n) is None]
     if not c.decision:
         unanswered.insert(0, "decision")
     if c.comfort_budget is None:
@@ -351,26 +546,36 @@ def evaluate_checklist(c: DecisionChecklist, target_iroas: float) -> ChecklistRe
     return ChecklistResult("go" if ok else "fix", plan, notes)
 
 
-# ----------------------------------------------------------------------------- verdict
-def verdict(comp: ComparisonResult, dry: DryRunResult, spend: SpendResult, check3: ChecklistResult):
-    """Combine the three checks into GO / FIX / DON'T TEST with reasons."""
+# ============================================================================ verdict
+@dataclass
+class Verdict:
+    label: str            # "GO", "FIX", "DON'T TEST"
+    reasons: list         # blocking reasons
+    warnings: list        # non-blocking cautions
+
+    def __iter__(self):   # allows: label, reasons, warnings = verdict(...)
+        return iter((self.label, self.reasons, self.warnings))
+
+
+def verdict(comp: ComparisonResult, dry: DryRunResult, spend: SpendResult, check3: ChecklistResult) -> Verdict:
+    """Combine the three checks into GO / FIX / DON'T TEST, with blocking reasons and warnings."""
+    warnings = []
+    for n in comp.notes + spend.noise.notes:
+        if any(key in n for key in ("caution", "weekly data only", "10-15%", "zero-sales", "missing data",
+                                    "under a year", "November", "same season", "under 3x", "recent")):
+            warnings.append(n)
+    warnings += [n for n in spend.notes if "sanity check" in n]
     if check3.status == "dont_test":
-        return "DON'T TEST", check3.notes
+        return Verdict("DON'T TEST", check3.notes, warnings)
     reasons = []
     if not comp.passes:
-        reasons += [n for n in comp.notes if "under a year" not in n and "between 10% and 15%" not in n]
+        reasons += [n for n in comp.notes if any(k in n for k in ("choose different controls", "above 20%", "shorter than the test"))]
     if not dry.passes:
         reasons += dry.notes
-    for flag, note_key in (
-        (spend.detectable is False, "MDE is larger"),
-        (spend.holdout_spend_sufficient is False, "spend you would turn off"),
-        (spend.within_comfort_budget is False, "comfort-zone"),
-        (spend.target_below_breakeven is True, "breakeven"),
-    ):
-        if flag:
-            reasons += [n for n in spend.notes if note_key in n]
+    reasons += [n for n in spend.notes if any(k in n for k in ("Power at the planned change", "too small to create",
+                                                                "comfort-zone", "breakeven"))]
     if check3.status != "go":
         reasons += check3.notes
     if reasons:
-        return "FIX", reasons
-    return "GO", ["All three checks pass on the data supplied, with the assumptions you entered."]
+        return Verdict("FIX", reasons, warnings)
+    return Verdict("GO", ["All three checks pass on the data supplied, with the assumptions you entered."], warnings)
