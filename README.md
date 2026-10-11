@@ -26,12 +26,12 @@ Credit to those teams for the methods this builds on.
 
 - **Correlation** between the test geos and the control, on both **daily and weekly** data, over the full history and over the most recent ~2x test length.
   - **Weekly correlation must not be weak.** If the weekly correlation is weak, the check fails: choose different controls.
-  - If the daily correlation is weak but the weekly one is OK, the check passes: read the test weekly and plan a longer test, using the recommended length from the power score (Check 2).
+  - If the daily correlation is weak but the weekly one is OK, the check passes: read the test weekly and plan a longer test. The recommended length is **at least 1.5x the planned length** (rounded up to whole weeks), or longer if the power score needs it. This is a warning, not a FIX on its own.
 - **MAPE of the scaled control.** The control is scaled to the test geos with a factor taken from a period **at least as long as the test**. Zero-sales days are left out of MAPE and counted; **WAPE** is reported alongside.
 - **Short-form out-of-sample dry run.**
   - The check holds back a final window about as long as the test, with a minimum of 2 weeks (2–4 weeks or more is typical). The scale factor and the noise model are fit on the earlier pre-period only, then the comparison predicts the held-back window.
   - Nothing changed during that window, so the comparison should show about zero lift.
-  - **Pass only if** the placebo lift is smaller than the MDE for your actual test length (in absolute value) **and** its 90% interval, using the corrected standard error for the holdout length, includes zero.
+  - **Pass only if** the placebo lift is smaller than the **upper end of the MDE range** for your actual test length (in absolute value) **and** its 90% interval, using the corrected standard error for the holdout length, includes zero.
 
 ### 2. Required spend: what does it cost to detect the lift you care about?
 
@@ -53,7 +53,7 @@ required spend = MDE × baseline treatment sales over the test window ÷ target 
     | 84 days | 0 / 0.5 / 0.8 | 10.3% / 9.0% / 11.0% | 83.7% / 83.3% / 84.3% |
 
     That checks the method on synthetic data, not your data.
-- **Power score:** `power = Φ(change ÷ se − z₉₀)`, using the upper end of the range: the chance the test detects your planned change. Under 80%, you get the shortest length (in whole weeks) that reaches 80%. For other lengths, the corrected-to-plain noise ratio and the upper-to-corrected ratio are assumed to carry over from the planned length; re-run the checks at the new length to confirm.
+- **Power score:** `power = Φ(change ÷ se − z₉₀)`, using the upper end of the range: the chance the test detects your planned change. Under 80%, you get the shortest length (in whole weeks) that reaches 80%; with weekly-only correlation, at least 1.5x the planned length. For other lengths, the corrected-to-plain noise ratio and the upper-to-corrected ratio are assumed to carry over from the planned length; re-run the checks at the new length to confirm.
 - **Baseline treatment sales:** the test geos' recent run rate × the test length.
 - **Holdout (`direction="decrease"`):** the baseline is the test geos' recent run rate **with the spend still on**, so it **includes** the sales driven by the spend you will turn off. The gap you must create is measured against that baseline: spend turned off × iROAS ≥ MDE × baseline. The test reads a drop, and the expected change is reported as a negative %.
 - **Heavy-up (`direction="increase"`):** the result is the extra spend on top of business as usual. Enter current spend in the test geos for a sanity check: if the extra spend is larger than current spend, iROAS may not hold at that scale.
@@ -78,9 +78,9 @@ These are guidance from practice, not rules. They're all parameters in `geo_pret
 
 | Measure | Acceptable | Preferred | Note |
 | --- | --- | --- | --- |
-| Correlation (daily and weekly, full history and recent) | above 90% | above 95% | Weekly must not be weak. Daily weak with weekly OK passes: read weekly, run longer. |
+| Correlation (daily and weekly, full history and recent) | above 90% | above 95% | Weekly must not be weak. Daily weak with weekly OK passes: read weekly, run at least 1.5x the planned length. |
 | MAPE of the scaled control (weekly) | 10–15% acceptable | under 10% strong | 15–20% is **caution**: not a failure, but the MDE will be higher and the result less certain. Over 20% is weak. |
-| Dry run | \|placebo\| < MDE (actual test length) **and** 90% interval includes zero | | Both are required. |
+| Dry run | \|placebo\| < upper end of the MDE range (actual test length) **and** 90% interval includes zero | | Both are required. |
 | Power at the planned change | 80% | | Below 80%: lengthen the test, change the cells, or plan a bigger change. |
 | Scale-factor period | at least the test length | | |
 | History | at least the test length | a year including a seasonal peak | |
