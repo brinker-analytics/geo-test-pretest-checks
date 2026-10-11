@@ -5,24 +5,33 @@ is a parameter you can change.
 
 Noise model (how the MDE is estimated from your own history)
 ------------------------------------------------------------
+The MDE is reported as a RANGE. Decisions (detectability, power score, recommended length) use
+the UPPER end. When neither the empirical nor the same-season estimate is available, the upper
+end equals the corrected estimate.
+
 1. Out-of-sample weekly errors (rolling): for each week in your history, fit the scale factor
    on the preceding `scale_days` days, predict the next 7 days, and record the % error.
    Their standard deviation is `sd`.
-2. Scale-factor error is included:  se = sd * sqrt(7/test_days + 7/scale_days).
-3. Autocorrelation: se is inflated by sqrt((1+rho)/(1-rho)), where rho is the lag-1
-   autocorrelation of the weekly residuals (floored at 0, capped at RHO_CAP).
-   This "corrected" se is the point estimate:  MDE = z * se,  z = z(90% one-sided) + z(80% power).
-4. Cross-checks that widen the reported MDE RANGE:
+2. Scale-factor error is included:  se = sd_eff * sqrt(7/test_days + 7/scale_days).
+3. Dependence between weeks: sd_eff is the larger of
+   - sd * sqrt((1+rho)/(1-rho)), rho = lag-1 autocorrelation of the out-of-sample weekly errors
+     (floored at 0, capped at RHO_CAP), and
+   - the long-run (Newey-West, Bartlett weights, lags up to test_days/7 - 1) SD of those errors,
+     which also catches slower drift between test and control over longer tests.
+4. Small-sample correction: se is multiplied by t(0.90, n_weeks-1) / z(0.90), because sd is
+   estimated from a limited number of weeks.
+   This "corrected" se gives MDE = z * se,  z = z(90% one-sided) + z(80% power).
+5. Cross-checks that widen the range:
    - empirical fake tests: rolling placebo tests of the full test length inside your history
-     (only when history is at least 3x the test length)
+     (only when history is at least 2x the test length)
    - same-season error (when history covers a year before the planned start)
-   The range runs from the lowest to the highest of these estimates. Decisions (detectability,
-   power score, recommended length) use the conservative (upper) end.
+   The range runs from the lowest to the highest of these estimates; with no cross-check it runs
+   from the uncorrected se (step 2 with plain sd) to the corrected one.
 
-On the seeded synthetic data the corrected point estimate is calibrated: the false-positive
-rate of a 90% one-sided test is close to 10% and power at the MDE close to 80% (see
-tests/test_calibration.py). That is a check of the method on synthetic data, not a guarantee for
-your data. This is a readiness gate, not a substitute for the design and analysis methods in
+Calibration on the seeded synthetic data (tests/test_calibration.py, 28- and 84-day tests, geo
+noise autocorrelation 0 / 0.5 / 0.8): the corrected estimate gives 7-13% false positives for a
+90% one-sided test and 72-88% power at the MDE. That is a check of the method on synthetic data,
+not a guarantee for your data. This is a readiness gate, not a substitute for the design and analysis methods in
 GeoLift, Trimmed Match, or Meridian GeoX.
 """
 from __future__ import annotations
@@ -33,6 +42,7 @@ from typing import Optional, Sequence
 import numpy as np
 import pandas as pd
 from scipy.stats import norm
+from scipy.stats import t as t_dist
 
 ALPHA_ONE_SIDED = 0.10
 POWER = 0.80
@@ -124,12 +134,9 @@ def _oos_weekly_errors(treat: pd.Series, ctrl: pd.Series, scale_days: int) -> pd
     return pd.Series(out, index=pd.DatetimeIndex(idx), dtype=float)
 
 
-def _residual_rho(treat: pd.Series, ctrl: pd.Series) -> float:
-    """Lag-1 autocorrelation of in-sample weekly residuals, floored at 0 and capped at RHO_CAP."""
-    k = _ratio_k(treat, ctrl)
-    tw, cw = _weekly(treat), _weekly(ctrl * k)
-    common = tw.index.intersection(cw.index)
-    e = (tw[common] / cw[common] - 1.0).to_numpy()
+def _oos_rho(errs: pd.Series) -> float:
+    """Lag-1 autocorrelation of the out-of-sample weekly errors, floored at 0 and capped at RHO_CAP."""
+    e = errs.to_numpy()
     if len(e) < 8:
         return 0.0
     e = e - e.mean()
@@ -137,6 +144,20 @@ def _residual_rho(treat: pd.Series, ctrl: pd.Series) -> float:
         return 0.0
     r = float(np.sum(e[1:] * e[:-1]) / np.sum(e * e))
     return float(min(max(r, 0.0), RHO_CAP))
+
+
+def _long_run_sd(errs: pd.Series, test_weeks: int) -> float:
+    """Newey-West long-run SD of the weekly errors (Bartlett weights, lags < test_weeks).
+
+    Negative autocovariances are floored at 0 so this never shrinks the estimate.
+    """
+    x = errs.to_numpy() - errs.to_numpy().mean()
+    n = len(x)
+    lr = float(np.sum(x * x) / n)
+    for j in range(1, min(test_weeks, n - 1)):
+        g = float(np.sum(x[j:] * x[:-j]) / n)
+        lr += 2 * (1 - j / test_weeks) * max(g, 0.0)
+    return float(np.sqrt(lr * n / (n - 1)))
 
 
 def _empirical_fake_test_sd(treat, ctrl, test_days, scale_days) -> tuple[float, int]:
@@ -161,10 +182,12 @@ class NoiseModel:
     scale_days: int
     weekly_sd: float              # SD of out-of-sample weekly % errors
     n_weeks: int
-    rho: float                    # lag-1 autocorrelation used (floored at 0, capped)
+    rho: float                    # lag-1 autocorrelation of OOS weekly errors (floored at 0, capped)
     ar_inflation: float
-    se_base: float                # with scale-factor error, no autocorrelation inflation
-    se_corrected: float           # point estimate (scale-factor error + autocorrelation)
+    long_run_sd: float            # Newey-West long-run SD of the OOS weekly errors
+    small_sample_factor: float    # t(0.90, n_weeks-1) / z(0.90)
+    se_base: float                # with scale-factor error, no dependence or small-sample correction
+    se_corrected: float           # corrected estimate (scale-factor error + dependence + small sample)
     se_empirical: Optional[float]
     n_fake_tests: int
     se_same_season: Optional[float]
@@ -181,9 +204,15 @@ class NoiseModel:
         return (Z_ONE_SIDED_90_CONF_80_POWER * self.se_low, Z_ONE_SIDED_90_CONF_80_POWER * self.se_high)
 
     def se_at(self, days: int, conservative: bool = True) -> float:
-        """Projected se for another test length (scale period = max(scale_days, days))."""
+        """Projected se for another test length (scale period = max(scale_days, days)).
+
+        Assumption: the corrected-to-plain noise ratio (dependence and small-sample corrections) and,
+        when conservative, the se_high / se_corrected ratio both carry over unchanged from the
+        planned length to other lengths. Re-run noise_model at the new length to check.
+        """
         s = max(self.scale_days, days)
-        base = self.weekly_sd * np.sqrt(7 / days + 7 / s) * self.ar_inflation
+        eff = self.se_corrected / np.sqrt(7 / self.test_days + 7 / self.scale_days)
+        base = eff * np.sqrt(7 / days + 7 / s)
         ratio = (self.se_high / self.se_corrected) if conservative else 1.0
         return float(base * ratio)
 
@@ -201,17 +230,21 @@ def noise_model(wide, test_geos, control_geos, test_days, scale_days=None,
         raise ValueError("Too little history for a noise estimate: need at least 6 out-of-sample weeks "
                          "after the scale-factor period.")
     sd = float(errs.std(ddof=1))
-    rho = _residual_rho(treat, ctrl)
+    rho = _oos_rho(errs)
     infl = float(np.sqrt((1 + rho) / (1 - rho)))
-    base = sd * np.sqrt(7 / test_days + 7 / scale_days)
-    corrected = base * infl
+    lr_sd = _long_run_sd(errs, test_days // 7)
+    tfac = float(t_dist.ppf(1 - ALPHA_ONE_SIDED, len(errs) - 1) / Z_ALPHA)
+    scale_term = np.sqrt(7 / test_days + 7 / scale_days)
+    base = sd * scale_term
+    sd_eff = max(sd * infl, lr_sd)
+    corrected = sd_eff * scale_term * tfac
     notes = []
 
     emp, n_fake = (float("nan"), 0)
-    if treat.notna().sum() >= 3 * test_days:
+    if treat.notna().sum() >= 2 * test_days:
         emp, n_fake = _empirical_fake_test_sd(treat, ctrl, test_days, scale_days)
     else:
-        notes.append("History is under 3x the test length: no empirical fake-test estimate.")
+        notes.append("History is under 2x the test length: no empirical fake-test estimate.")
 
     season_se = None
     start = pd.Timestamp(planned_start) if planned_start is not None else treat.index.max() + pd.Timedelta(days=1)
@@ -219,7 +252,7 @@ def noise_model(wide, test_geos, control_geos, test_days, scale_days=None,
     if treat.index.min() <= last_year - pd.Timedelta(days=scale_days):
         same = errs[(errs.index >= last_year) & (errs.index < last_year + pd.Timedelta(days=test_days))]
         if len(same) >= 2:
-            season_se = float(same.std(ddof=1) * np.sqrt(7 / test_days + 7 / scale_days) * infl)
+            season_se = float(same.std(ddof=1) * (sd_eff / sd if sd > 0 else 1.0) * scale_term * tfac)
             if season_se > corrected * 1.25:
                 notes.append("Error in the same season last year was notably higher: expect a larger MDE in that season.")
     window = pd.date_range(start, periods=test_days, freq="D")
@@ -231,7 +264,7 @@ def noise_model(wide, test_geos, control_geos, test_days, scale_days=None,
         lo, hi = min(candidates), max(candidates)
     else:
         lo, hi = base, corrected
-    return NoiseModel(test_days, scale_days, sd, len(errs), rho, infl, float(base), float(corrected),
+    return NoiseModel(test_days, scale_days, sd, len(errs), rho, infl, lr_sd, tfac, float(base), float(corrected),
                       emp if np.isfinite(emp) else None, n_fake, season_se, float(lo), float(hi), notes)
 
 
@@ -305,14 +338,15 @@ def comparison_strength(wide, test_geos, control_geos, test_days, scale_days=Non
 
     bd, bw, bm = _band_corr(cd), _band_corr(cw), _band_mape(mw)
     weekly_only = bd == "weak" and bw != "weak"
-    passes = not (bd == "weak" and bw == "weak") and bm != "weak" and observed >= test_days
+    # Weekly correlation must not be weak. Daily-weak with weekly OK passes (read weekly, longer test).
+    passes = bw != "weak" and bm != "weak" and observed >= test_days
 
     notes = []
     if weekly_only:
         notes.append("Correlation passes on weekly data only: read the test weekly and use the recommended "
                      "length from the power score.")
-    if bd == "weak" and bw == "weak":
-        notes.append("Correlation is below 90% on daily and weekly data: choose different controls.")
+    if bw == "weak":
+        notes.append("Weekly correlation is weak: choose different controls.")
     if _band_corr(cdr) == "weak" and _band_corr(cwr) == "weak" and not (bd == "weak" and bw == "weak"):
         notes.append(f"Correlation over the most recent {recent} days is weak on both daily and weekly data: "
                      "the relationship may have changed recently.")
@@ -358,7 +392,8 @@ def dry_run(wide, test_geos, control_geos, test_days, holdout_days=None, scale_d
 
     Hold back a final window about as long as the test (at least 2 weeks). The scale factor and the
     noise model are estimated on the pre-period only, so the holdout never leaks into them.
-    Pass: |placebo lift| < MDE (corrected) AND the 90% interval (corrected se) includes zero.
+    Pass: |placebo lift| < MDE (corrected, at the actual test length) AND the 90% interval
+    (corrected se at the holdout length) includes zero.
     """
     _check_test_days(test_days)
     h = max(holdout_days or test_days, MIN_HOLDOUT_DAYS)
@@ -367,13 +402,14 @@ def dry_run(wide, test_geos, control_geos, test_days, holdout_days=None, scale_d
     scale_days = max(scale_days or test_days, h)
     pre = wide.iloc[:-h]
     hold = wide.iloc[-h:]
-    nm = noise_model(pre, test_geos, control_geos, h, scale_days=scale_days)
+    nm_h = noise_model(pre, test_geos, control_geos, h, scale_days=scale_days)        # interval: holdout length
+    nm = noise_model(pre, test_geos, control_geos, test_days, scale_days=scale_days)  # MDE: actual test length
     pt, pc = _series(pre, test_geos), _series(pre, control_geos)
     k = _ratio_k(pt.iloc[-scale_days:], pc.iloc[-scale_days:])
     ht, hc = _series(hold, test_geos), _series(hold, control_geos)
     m = ht.notna() & hc.notna()
     lift = float(ht[m].sum() / (hc[m].sum() * k) - 1.0)
-    se = nm.se_corrected
+    se = nm_h.se_corrected
     lo, hi = lift - Z_TWO_SIDED_90 * se, lift + Z_TWO_SIDED_90 * se
     incl = lo <= 0.0 <= hi
     below = abs(lift) < nm.mde or (nm.mde == 0.0 and abs(lift) < 1e-12)

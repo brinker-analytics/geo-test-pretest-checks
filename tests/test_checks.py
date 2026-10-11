@@ -92,7 +92,9 @@ def test_test_days_must_be_whole_weeks(wide):
 def test_scale_factor_error_and_mde_range(wide):
     nm = noise_model(wide, T, C, 28)
     assert nm.se_base == pytest.approx(nm.weekly_sd * np.sqrt(7 / 28 + 7 / 28))
-    assert nm.se_corrected == pytest.approx(nm.se_base * np.sqrt((1 + nm.rho) / (1 - nm.rho)))
+    eff = max(nm.weekly_sd * np.sqrt((1 + nm.rho) / (1 - nm.rho)), nm.long_run_sd)
+    assert nm.se_corrected == pytest.approx(eff * np.sqrt(7 / 28 + 7 / 28) * nm.small_sample_factor)
+    assert nm.small_sample_factor > 1 and 0 <= nm.rho <= 0.8
     lo, hi = nm.mde_range
     assert lo <= nm.mde <= hi
     assert nm.se_empirical is not None  # 455 days >= 3 x 28
@@ -135,6 +137,25 @@ def test_weekly_only_correlation_does_not_force_fix(wide):
     assert v.label == "GO" and any("weekly data only" in w for w in v.warnings)
 
 
+def test_daily_ok_weekly_weak_fails():
+    idx = pd.date_range("2025-01-06", periods=364, freq="D")
+    rng = np.random.default_rng(0)
+    dow = np.tile([1.0, 1.6, 2.2, 1.4, 0.6, 0.3, 0.2], 52)
+    lvl_t = np.repeat(1 + rng.normal(0, 0.03, 52), 7)
+    lvl_c = np.repeat(1 + rng.normal(0, 0.03, 52), 7)
+    w = pd.DataFrame({"T": 1000 * dow * lvl_t, "C": 800 * dow * lvl_c}, index=idx)
+    r = comparison_strength(w, ["T"], ["C"], 28)
+    assert r.corr_daily_band != "weak" and r.corr_weekly_band == "weak" and r.mape_weekly_band != "weak"
+    assert not r.passes and "Weekly correlation is weak: choose different controls." in r.notes
+
+
+def test_loader_keeps_geo_names_containing_total(tmp_path):
+    p = tmp_path / "t.csv"
+    p.write_text("Date,City,Purchase revenue\n20260101,Totalville,5\n2026-1-2,Totalville,6\nGrand total,,11\n")
+    df = load_ga4_csv(p)
+    assert df["sales"].tolist() == [5.0, 6.0] and df.attrs["load_report"]["total_rows_dropped"] == 1
+
+
 def test_mape_bands():
     from geo_pretest.checks import _band_mape
     assert [_band_mape(x) for x in (0.05, 0.12, 0.18, 0.25)] == ["strong", "acceptable", "caution", "weak"]
@@ -145,10 +166,22 @@ def test_dry_run_has_no_leakage(wide):
     w = wide.copy()
     w.iloc[-a.holdout_days:] *= 3.0          # change only the holdout, in every geo
     b = dry_run(w, T, C, 28)
-    assert a.scale_factor == b.scale_factor and a.se_corrected == b.se_corrected
+    assert a.scale_factor == b.scale_factor and a.se_corrected == b.se_corrected and a.mde == b.mde
     w.iloc[-a.holdout_days:, w.columns.get_loc("Example DMA 03")] *= 1.5   # fake lift in a test geo
     c = dry_run(w, T, C, 28)
     assert c.placebo_lift > a.placebo_lift and not c.passes
+
+
+def test_dry_run_mde_uses_actual_test_length(wide):
+    from geo_pretest.checks import noise_model as nmf
+    d = dry_run(wide, T, C, 84)
+    assert d.mde == pytest.approx(nmf(wide.iloc[:-84], T, C, 84).mde)
+
+
+def test_upper_end_equals_corrected_without_cross_checks(wide):
+    nm = noise_model(wide.iloc[-120:], T, C, 56)   # history < 2x test, no full year
+    assert nm.se_empirical is None and nm.se_same_season is None
+    assert nm.se_high == nm.se_corrected
 
 
 def test_dry_run_rule_requires_both_conditions(wide):
