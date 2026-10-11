@@ -25,12 +25,13 @@ Credit to those teams for the methods this builds on.
 ### 1. Comparison strength: does the control track the test geos?
 
 - **Correlation** between the test geos and the control, on both **daily and weekly** data, over the full history and over the most recent ~2x test length.
-  - If only the weekly correlation passes, the check still passes: read the test weekly and use the recommended length from the power score (Check 2).
+  - **Weekly correlation must not be weak.** If the weekly correlation is weak, the check fails: choose different controls.
+  - If the daily correlation is weak but the weekly one is OK, the check passes: read the test weekly and plan a longer test, using the recommended length from the power score (Check 2).
 - **MAPE of the scaled control.** The control is scaled to the test geos with a factor taken from a period **at least as long as the test**. Zero-sales days are left out of MAPE and counted; **WAPE** is reported alongside.
 - **Short-form out-of-sample dry run.**
   - The check holds back a final window about as long as the test, with a minimum of 2 weeks (2–4 weeks or more is typical). The scale factor and the noise model are fit on the earlier pre-period only, then the comparison predicts the held-back window.
   - Nothing changed during that window, so the comparison should show about zero lift.
-  - **Pass only if** the placebo lift is smaller than the MDE (in absolute value) **and** its 90% interval, using the corrected standard error, includes zero.
+  - **Pass only if** the placebo lift is smaller than the MDE for your actual test length (in absolute value) **and** its 90% interval, using the corrected standard error for the holdout length, includes zero.
 
 ### 2. Required spend: what does it cost to detect the lift you care about?
 
@@ -38,15 +39,23 @@ Credit to those teams for the methods this builds on.
 required spend = MDE × baseline treatment sales over the test window ÷ target iROAS
 ```
 
-- **MDE:** sized at **90% confidence, 80% power, one-sided**, from your own noise, and reported as a **range**:
+- **MDE range.** The MDE is reported as a **range** (low to high), sized at **90% confidence, 80% power, one-sided**, from your own noise. **Decisions use the upper end.** When neither cross-check below is available, the upper end equals the corrected estimate.
   - **Noise:** the out-of-sample weekly % error of the scaled control, from rolling windows (scale factor fit on the preceding period, next week predicted).
   - **Scale-factor error included:** `se = sd × sqrt(7/test_days + 7/scale_days)`.
-  - **Autocorrelation:** `se` is inflated by `sqrt((1+ρ)/(1−ρ))`, where ρ is the lag-1 autocorrelation of the in-sample weekly residuals (floored at 0, capped at 0.8). `MDE = z × se` is the **corrected estimate**.
-  - **Cross-checks:** an empirical version from rolling fake tests of the full test length in your history (when the history is at least 3x the test length), and the same-season error from last year (when you have a year). The range runs from the lowest to the highest estimate; decisions use the upper end.
-  - On the seeded synthetic data the corrected estimate is calibrated: about 10% false positives and about 80% power at the MDE (`pytest -m slow`). That checks the method, not your data.
-- **Power score:** `power = Φ(change ÷ se − z₉₀)`, the chance the test detects your planned change. Under 80%, you get the shortest length (in whole weeks) that reaches 80%.
+  - **Dependence between weeks:** `sd` is replaced by the larger of `sd × sqrt((1+ρ)/(1−ρ))` (ρ = lag-1 autocorrelation of the out-of-sample weekly errors, floored at 0, capped at 0.8) and the long-run (Newey-West) SD of those errors, which also catches slow drift over longer tests.
+  - **Small-sample correction:** `se` is multiplied by `t(0.90, weeks−1) ÷ z(0.90)`, because the noise is estimated from a limited number of weeks. `MDE = z × se` is the **corrected estimate**.
+  - **Cross-checks:** an empirical version from rolling fake tests of the full test length in your history (when the history is at least 2x the test length), and the same-season error from last year (when you have a year). The range runs from the lowest to the highest estimate; with no cross-check it runs from the uncorrected to the corrected estimate.
+  - **Calibration** on the seeded synthetic data (`pytest -m slow`), corrected estimate, 300–360 fake tests per setting:
+
+    | Test length | Geo noise autocorrelation | False positives (target 10%) | Power at the MDE (target 80%) |
+    | --- | --- | --- | --- |
+    | 28 days | 0 / 0.5 / 0.8 | 11.7% / 10.8% / 8.9% | 82.8% / 83.9% / 84.2% |
+    | 84 days | 0 / 0.5 / 0.8 | 10.3% / 9.0% / 11.0% | 83.7% / 83.3% / 84.3% |
+
+    That checks the method on synthetic data, not your data.
+- **Power score:** `power = Φ(change ÷ se − z₉₀)`, using the upper end of the range: the chance the test detects your planned change. Under 80%, you get the shortest length (in whole weeks) that reaches 80%. For other lengths, the corrected-to-plain noise ratio and the upper-to-corrected ratio are assumed to carry over from the planned length; re-run the checks at the new length to confirm.
 - **Baseline treatment sales:** the test geos' recent run rate × the test length.
-- **Holdout (`direction="decrease"`):** the baseline **includes** the sales driven by the spend you will turn off. The gap you must create is measured against that baseline: spend turned off × iROAS ≥ MDE × baseline. The test reads a drop.
+- **Holdout (`direction="decrease"`):** the baseline is the test geos' recent run rate **with the spend still on**, so it **includes** the sales driven by the spend you will turn off. The gap you must create is measured against that baseline: spend turned off × iROAS ≥ MDE × baseline. The test reads a drop, and the expected change is reported as a negative %.
 - **Heavy-up (`direction="increase"`):** the result is the extra spend on top of business as usual. Enter current spend in the test geos for a sanity check: if the extra spend is larger than current spend, iROAS may not hold at that scale.
 - **Test length:** whole weeks only (a multiple of 7). Weekly reads use Monday–Sunday weeks; weeks with any missing day are dropped.
 - **Profitability:** the revenue-basis target iROAS is compared with the margin-based breakeven iROAS (1 ÷ gross margin). If the target is below breakeven, a "win" would still lose money.
@@ -69,9 +78,9 @@ These are guidance from practice, not rules. They're all parameters in `geo_pret
 
 | Measure | Acceptable | Preferred | Note |
 | --- | --- | --- | --- |
-| Correlation (daily and weekly, full history and recent) | above 90% | above 95% | Weekly-only pass is OK: read weekly and use the recommended length. |
+| Correlation (daily and weekly, full history and recent) | above 90% | above 95% | Weekly must not be weak. Daily weak with weekly OK passes: read weekly, run longer. |
 | MAPE of the scaled control (weekly) | 10–15% acceptable | under 10% strong | 15–20% is **caution**: not a failure, but the MDE will be higher and the result less certain. Over 20% is weak. |
-| Dry run | \|placebo\| < MDE **and** 90% interval includes zero | | Both are required. |
+| Dry run | \|placebo\| < MDE (actual test length) **and** 90% interval includes zero | | Both are required. |
 | Power at the planned change | 80% | | Below 80%: lengthen the test, change the cells, or plan a bigger change. |
 | Scale-factor period | at least the test length | | |
 | History | at least the test length | a year including a seasonal peak | |
