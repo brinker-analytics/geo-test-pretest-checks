@@ -2,6 +2,9 @@
 
 Run three checks on your own geo-level sales history before you launch a geo test.
 
+> **Built by [Brinker Analytics](https://brinkeranalytics.com).** Eric Brinker's marketing-measurement consulting practice for DTC brands: geo tests, an MMM, and attribution.
+> **Contact:** [eric@brinkeranalytics.com](mailto:eric@brinkeranalytics.com) or the [contact page](https://brinkeranalytics.com/contact).
+
 > **Full guide (coming soon):** [Before You Call a Geo Test Feasible: 3 Pre-Launch Checks (With Code)](https://brinkeranalytics.com/insights/before-you-call-a-geo-test-feasible) on brinkeranalytics.com. It explains the reasoning behind each check.
 
 ## What it is, and what it isn't
@@ -137,6 +140,7 @@ notebooks/            pretest_checks.ipynb (executed, outputs kept)
 data/                 synthetic_ga4_sales_by_dma.csv (synthetic sample)
 scripts/              make_synthetic_data.py (seeded generator)
 tests/                pytest tests on synthetic data (+ slow calibration test)
+AGENTS.md             notes for coding agents working on this repo
 ```
 
 ## License
@@ -145,4 +149,4 @@ tests/                pytest tests on synthetic data (+ slow calibration test)
 - **Documentation** (this README and the notebook's text): [CC BY 4.0](LICENSE-docs). Please attribute "Eric Brinker, Brinker Analytics" and link to the guide.
 - **Citing:** see [CITATION.cff](CITATION.cff).
 
-Written by Eric Brinker, [Brinker Analytics](https://brinkeranalytics.com).
+Written and maintained by Eric Brinker, [Brinker Analytics](https://brinkeranalytics.com). Questions: [eric@brinkeranalytics.com](mailto:eric@brinkeranalytics.com) or the [contact page](https://brinkeranalytics.com/contact).

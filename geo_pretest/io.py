@@ -1,5 +1,7 @@
 """Load a GA4-style CSV export of sales by date by geo (e.g. DMA).
 
+Author: Eric Brinker, Brinker Analytics (https://brinkeranalytics.com).
+
 There is no GA4 API integration and no credentials: export the report from GA4 as CSV and
 point the loader at the file.
 

@@ -1,5 +1,7 @@
 """The three pre-launch checks.
 
+Author: Eric Brinker, Brinker Analytics (https://brinkeranalytics.com).
+
 Thresholds are Eric Brinker's "how I read it" guidance, not universal rules. Every one of them
 is a parameter you can change.
 

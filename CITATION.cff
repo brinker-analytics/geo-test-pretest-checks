@@ -5,7 +5,10 @@ authors:
   - family-names: Brinker
     given-names: Eric
     affiliation: Brinker Analytics
+    email: eric@brinkeranalytics.com
+    website: "https://brinkeranalytics.com"
 version: 0.2.0
 date-released: 2026-10-10
 license: MIT
 url: "https://brinkeranalytics.com/insights/before-you-call-a-geo-test-feasible"
+repository-code: "https://github.com/brinker-analytics/geo-test-pretest-checks"

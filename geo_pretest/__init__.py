@@ -7,6 +7,8 @@ Check 3  can the business act (decision checklist)
 Nothing here produces an MDE, iROAS, or duration from generic inputs. Every number is
 computed from the data you load; any value you type in (target iROAS, margin, budget)
 is your assumption and is echoed back as such.
+
+Author: Eric Brinker, Brinker Analytics (https://brinkeranalytics.com).
 """
 from .io import load_ga4_csv, to_wide, missing_days
 from .checks import (
@@ -22,3 +24,7 @@ __all__ = [
     "required_spend", "evaluate_checklist", "verdict", "Z_ONE_SIDED_90_CONF_80_POWER",
 ]
 __version__ = "0.2.0"
+__author__ = "Eric Brinker, Brinker Analytics"
+__maintainer__ = "Eric Brinker <eric@brinkeranalytics.com>"
+__url__ = "https://github.com/brinker-analytics/geo-test-pretest-checks"
+# Brinker Analytics: https://brinkeranalytics.com (contact: https://brinkeranalytics.com/contact)
