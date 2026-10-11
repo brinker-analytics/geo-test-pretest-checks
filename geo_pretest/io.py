@@ -82,7 +82,9 @@ def load_ga4_csv(path, date_col: str | None = None, geo_col: str | None = None,
     report = {"date_col": d, "geo_col": g, "sales_col": s, "rows_read": len(raw)}
     dates = raw[d].fillna("").str.strip()
     geos = raw[g].fillna("").str.strip()
-    total_mask = dates.str.lower().str.contains("total") | geos.str.lower().str.contains("total")
+    # Only whole-cell total labels: a geo whose name merely contains "total" must not be dropped.
+    total_re = r"^(grand\s+)?totals?$"
+    total_mask = dates.str.lower().str.match(total_re) | geos.str.lower().str.match(total_re)
     notset_mask = geos.str.lower().isin(DROP_GEOS)
     vals = pd.to_numeric(raw[s].fillna("").str.replace(r"[,$£€\s]", "", regex=True), errors="coerce")
     report["total_rows_dropped"] = int(total_mask.sum())
@@ -92,6 +94,9 @@ def load_ga4_csv(path, date_col: str | None = None, geo_col: str | None = None,
     dates, geos, vals = dates[keep], geos[keep], vals[keep]
 
     parsed = pd.to_datetime(dates.str.replace("-", "", regex=False), format="%Y%m%d", errors="coerce")
+    other = parsed.isna() & dates.ne("")
+    if other.any():  # e.g. 2026-1-5; ambiguous US/EU slash dates are not guessed
+        parsed[other] = pd.to_datetime(dates[other], format="%Y-%m-%d", errors="coerce")
     bad = parsed.isna() | vals.isna()
     if bad.any():
         raise ValueError(f"{int(bad.sum())} rows have an unparseable date or non-numeric {s}.")
