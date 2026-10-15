@@ -5,7 +5,7 @@ Run three checks on your own geo-level sales history before you launch a geo tes
 > **Built by [Brinker Analytics](https://brinkeranalytics.com).** Eric Brinker's marketing-measurement consulting practice for DTC brands: geo tests, an MMM, and attribution.
 > **Contact:** [eric@brinkeranalytics.com](mailto:eric@brinkeranalytics.com) or the [contact page](https://brinkeranalytics.com/contact).
 
-> **Full guide (coming soon):** [Before You Call a Geo Test Feasible: 3 Pre-Launch Checks (With Code)](https://brinkeranalytics.com/insights/before-you-call-a-geo-test-feasible) on brinkeranalytics.com. It explains the reasoning behind each check.
+> **Full guide:** [Before You Call a Geo Test Feasible: 3 Pre-Launch Checks (With Code)](https://brinkeranalytics.com/insights/before-you-call-a-geo-test-feasible) on brinkeranalytics.com. It explains the reasoning behind each check.
 
 ## What it is, and what it isn't
 
