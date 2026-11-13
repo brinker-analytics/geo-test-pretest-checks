@@ -132,6 +132,17 @@ Keep real exports out of the repo. `data/private/` is git-ignored.
 - **The MDE is a corrected estimate, not a promise.** It includes the scale factor's own error and week-to-week autocorrelation, and it is cross-checked against fake tests in your history. It is still an estimate from past noise. Season: if the test window overlaps November–December you get a warning.
 - **Not covered:** spillover between geos, concurrent promotions, and regional events. Rule those out separately.
 
+## What to do with this
+
+- **If the verdict is GO,** write the stepped game plan with the decision maker, then run the test in the design tool you picked (GeoLift, Trimmed Match or Meridian GeoX). Keep the upper end of the MDE range as the bar the result has to clear.
+- **If weekly correlation is weak,** choose different controls and run the checks again before you change anything else.
+- **If daily correlation is weak but weekly is OK,** plan to read the test weekly and run it at least 1.5x the planned length.
+- **If the power score is under 80%,** lengthen the test to the suggested whole-week length, change the cells, or plan a bigger spend change, then re-run the checks at the new length.
+- **If the target iROAS is below the breakeven iROAS,** a "win" would still lose money. Revisit the target or the channel before you launch.
+- **If the verdict is DON'T TEST,** the business wouldn't act on the result. Test a different channel or question it would act on.
+
+If you want a second opinion on your verdict before you put budget behind the test, send me a note and we'll talk it through: [Schedule a call](https://brinkeranalytics.com/contact).
+
 ## Repository layout
 
 ```
