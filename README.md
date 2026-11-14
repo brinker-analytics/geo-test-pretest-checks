@@ -61,7 +61,7 @@ required spend = MDE × baseline treatment sales over the test window ÷ target 
 - **Holdout (`direction="decrease"`):** the baseline is the test geos' recent run rate **with the spend still on**, so it **includes** the sales driven by the spend you will turn off. The gap you must create is measured against that baseline: spend turned off × iROAS ≥ MDE × baseline. The test reads a drop, and the expected change is reported as a negative %.
 - **Heavy-up (`direction="increase"`):** the result is the extra spend on top of business as usual. Enter current spend in the test geos for a sanity check: if the extra spend is larger than current spend, iROAS may not hold at that scale.
 - **Test length:** whole weeks only (a multiple of 7). Weekly reads use Monday–Sunday weeks; weeks with any missing day are dropped.
-- **Profitability:** the revenue-basis target iROAS is compared with the margin-based breakeven iROAS (1 ÷ gross margin). If the target is below breakeven, a "win" would still lose money.
+- **Profitability:** the revenue-basis target iROAS is compared with the margin-based breakeven iROAS (1 ÷ margin before ad spend, passed as `gross_margin`). If the target is below breakeven, a "win" would still lose money.
 
 ### 3. Can the business act on the result?
 
@@ -134,14 +134,14 @@ Keep real exports out of the repo. `data/private/` is git-ignored.
 
 ## What to do with this
 
-- **If the verdict is GO,** write the stepped game plan with the decision maker, then run the test in the design tool you picked (GeoLift, Trimmed Match or Meridian GeoX). Keep the upper end of the MDE range as the bar the result has to clear.
+- **If the verdict is GO,** write the stepped game plan with the decision maker, then run the test in the design tool you picked (GeoLift, Trimmed Match or Meridian GeoX). Size the test on the upper end of the MDE range, and check the result against it.
 - **If weekly correlation is weak,** choose different controls and run the checks again before you change anything else.
 - **If daily correlation is weak but weekly is OK,** plan to read the test weekly and run it at least 1.5x the planned length.
 - **If the power score is under 80%,** lengthen the test to the suggested whole-week length, change the cells, or plan a bigger spend change, then re-run the checks at the new length.
 - **If the target iROAS is below the breakeven iROAS,** a "win" would still lose money. Revisit the target or the channel before you launch.
 - **If the verdict is DON'T TEST,** the business wouldn't act on the result. Test a different channel or question it would act on.
 
-If you want a second opinion on your verdict before you put budget behind the test, send me a note and we'll talk it through: [Schedule a call](https://brinkeranalytics.com/contact).
+If you want a second opinion on your verdict before you put budget behind the test, send me a note and we'll talk it through: [Get in touch](https://brinkeranalytics.com/contact).
 
 ## Repository layout
 
