@@ -143,6 +143,8 @@ Keep real exports out of the repo. `data/private/` is git-ignored.
 
 If you want a second opinion on your verdict before you put budget behind the test, send me a note and we'll talk it through: [Get in touch](https://brinkeranalytics.com/contact).
 
+Picked a first channel to test and still sizing the holdout? [Would It Have Sold Anyway?](https://brinkeranalytics.com/guides/would-it-have-sold-anyway) walks the path from that choice to a low-risk geo holdout and a budget move.
+
 ## Repository layout
 
 ```
